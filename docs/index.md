@@ -3,23 +3,12 @@
 layout: home
 
 hero:
-  name: "个人博客"
-  text: "个人博客"
-  tagline: My great project tagline
+  name: "LoveTamako个人博客"
+  text: "自由之路"
+  tagline: 记录学习各类计算机技术的历程 还有一些碎碎念
   actions:
     - theme: brand
-      text: Markdown Examples
-      link: /markdown-examples
-    - theme: alt
-      text: API Examples
-      link: /api-examples
-
-features:
-  - title: Feature A
-    details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
-  - title: Feature B
-    details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
-  - title: Feature C
-    details: Lorem ipsum dolor sit amet, consectetur adipiscing elit
+      text: Java技术栈
+      link: /java/start
 ---
 
