@@ -1,4 +1,5 @@
 ---
+# Frontmatter（YAML）写法
 # https://vitepress.dev/reference/default-theme-home-page
 layout: home
 
@@ -8,7 +9,7 @@ hero:
   tagline: 记录学习各类计算机技术的历程 还有一些碎碎念
   actions:
     - theme: brand
-      text: Java技术栈
+      text: Java
       link: /java/start
 ---
 

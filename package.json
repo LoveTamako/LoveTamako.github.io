@@ -1,6 +1,10 @@
 {
   "devDependencies": {
-    "vitepress": "^2.0.0-alpha.15"
+    "@iconify/vue": "^5.0.0",
+    "@types/node": "^25.5.0",
+    "vitepress": "^2.0.0-alpha.15",
+    "vitepress-plugin-auto-sidebar": "^1.4.0",
+    "vitepress-plugin-group-icons": "^1.7.1"
   },
   "scripts": {
     "docs:dev": "vitepress dev docs",

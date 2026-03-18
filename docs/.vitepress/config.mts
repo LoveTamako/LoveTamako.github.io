@@ -9,7 +9,7 @@ export default defineConfig({
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: '首页', link: '/' },
-      { text: 'Java技术栈', link: '/java/start' }
+      { text: 'Java', link: '/java/start' }
     ],
 
     sidebar: {
@@ -21,13 +21,16 @@ export default defineConfig({
           ]
         },
         {
-          text: 'JVM虚拟机',
+          text: 'JUC并发编程',
+          collapsed: true, // <-- 关键：设置为可折叠
           items: [
-            { text: 'JVM概述', link: '/java/jvm/overview' },
-            { text: '类加载机制', link: '/java/jvm/classloader' },
-            { text: '运行时数据区', link: '/java/jvm/runtime-data-area' },
-            { text: '垃圾回收机制', link: '/java/jvm/gc' },
-            { text: '性能调优', link: '/java/jvm/tuning' }
+            { text: 'JUC概述', link: '/java/juc/overview' },
+            { text: '线程基础', link: '/java/juc/thread-basics' },
+            { text: '锁机制', link: '/java/juc/locks' },
+            { text: '原子类', link: '/java/juc/atomic' },
+            { text: '并发容器', link: '/java/juc/collections' },
+            { text: '线程池', link: '/java/juc/executor' },
+            { text: '并发工具类', link: '/java/juc/tools' }
           ]
         }
       ]
