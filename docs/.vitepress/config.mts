@@ -6,6 +6,7 @@ export default defineConfig({
   title: "LoveTamako个人博客",
   description: "LoveTamako个人博客",
   themeConfig: {
+    logo: '/images/tamako.svg',
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: '首页', link: '/' },

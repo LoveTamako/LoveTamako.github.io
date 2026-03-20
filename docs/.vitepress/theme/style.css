@@ -1,0 +1,269 @@
+:root {
+  --vp-c-brand-1: #c0c0c0;
+  --vp-c-brand-2: #d1d1d1;
+  --vp-c-brand-3: #e5e5e5;
+  --vp-c-brand-soft: rgba(192, 192, 192, 0.24);
+  --vp-c-bg: #ffffff;
+  --vp-c-bg-alt: #fbfbfb;
+  --vp-c-bg-elv: rgba(255, 255, 255, 0.92);
+  --vp-c-bg-soft: rgba(245, 245, 245, 0.88);
+  --vp-c-text-1: #000000;
+  --vp-c-text-2: #333333;
+  --vp-c-text-3: #666666;
+  --vp-c-divider: rgba(192, 192, 192, 0.45);
+  --lt-silver-1: #c0c0c0;
+  --lt-silver-2: #e5e5e5;
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #000000 0%, #5a5a5a 44%, #c0c0c0 100%);
+  --vp-home-hero-image-background-image:
+    radial-gradient(circle at 24% 32%, rgba(229, 229, 229, 0.88), rgba(229, 229, 229, 0) 56%),
+    radial-gradient(circle at 72% 68%, rgba(192, 192, 192, 0.22), rgba(192, 192, 192, 0) 58%);
+  --vp-home-hero-image-filter: none;
+  --vp-button-brand-border: #c0c0c0;
+  --vp-button-brand-text: #000000;
+  --vp-button-brand-bg: #f9f9f9;
+  --vp-button-brand-hover-border: #a8a8a8;
+  --vp-button-brand-hover-text: #000000;
+  --vp-button-brand-hover-bg: #f1f1f1;
+  --vp-button-alt-border: #e5e5e5;
+  --vp-button-alt-text: #333333;
+  --vp-button-alt-bg: #ffffff;
+  --vp-button-alt-hover-border: #bcbcbc;
+  --vp-button-alt-hover-text: #111111;
+  --vp-button-alt-hover-bg: #f5f5f5;
+  --vp-font-family-base: "Avenir Next", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
+  --vp-font-family-title: "Georgia", "Times New Roman", "Songti SC", serif;
+}
+
+.dark {
+  --vp-c-brand-1: #d7d7d7;
+  --vp-c-brand-2: #c0c0c0;
+  --vp-c-brand-3: #9f9f9f;
+  --vp-c-brand-soft: rgba(243, 243, 239, 0.16);
+  --vp-c-bg: #080808;
+  --vp-c-bg-alt: #111111;
+  --vp-c-bg-elv: rgba(255, 255, 255, 0.04);
+  --vp-c-bg-soft: rgba(255, 255, 255, 0.05);
+  --vp-c-text-1: #f5f5f0;
+  --vp-c-text-2: #c9c9c3;
+  --vp-c-text-3: #8f8f89;
+  --vp-c-divider: rgba(255, 255, 255, 0.08);
+  --vp-home-hero-name-background: linear-gradient(120deg, #ffffff 0%, #d0d0d0 44%, #8f8f8f 100%);
+  --vp-home-hero-image-background-image:
+    radial-gradient(circle at 24% 32%, rgba(229, 229, 229, 0.18), rgba(229, 229, 229, 0) 56%),
+    radial-gradient(circle at 72% 68%, rgba(192, 192, 192, 0.12), rgba(192, 192, 192, 0) 58%);
+  --vp-button-brand-border: #f5f5f0;
+  --vp-button-brand-text: #080808;
+  --vp-button-brand-bg: #f5f5f0;
+  --vp-button-brand-hover-border: #ffffff;
+  --vp-button-brand-hover-text: #080808;
+  --vp-button-brand-hover-bg: #ffffff;
+  --vp-button-alt-border: rgba(255, 255, 255, 0.12);
+  --vp-button-alt-text: #f5f5f0;
+  --vp-button-alt-bg: rgba(255, 255, 255, 0.04);
+  --vp-button-alt-hover-border: rgba(255, 255, 255, 0.22);
+  --vp-button-alt-hover-text: #ffffff;
+  --vp-button-alt-hover-bg: rgba(255, 255, 255, 0.08);
+}
+
+html {
+  scroll-behavior: auto;
+}
+
+body {
+  background:
+    linear-gradient(180deg, #ffffff 0%, #fbfbfb 100%);
+}
+
+.dark body {
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.06), transparent 24%),
+    linear-gradient(180deg, #050505 0%, #111111 100%);
+}
+
+.Layout {
+  background:
+    radial-gradient(circle at 10% 16%, rgba(229, 229, 229, 0.6), transparent 28%),
+    radial-gradient(circle at 86% 14%, rgba(212, 175, 55, 0.05), transparent 24%);
+}
+
+.dark .Layout {
+  background:
+    radial-gradient(circle at 12% 18%, rgba(255, 255, 255, 0.05), transparent 22%),
+    radial-gradient(circle at 88% 12%, rgba(255, 255, 255, 0.04), transparent 22%);
+}
+
+.VPNavBar {
+  background: rgba(246, 246, 243, 0.72) !important;
+  backdrop-filter: blur(18px);
+  border-bottom: 1px solid rgba(17, 17, 17, 0.06);
+}
+
+.dark .VPNavBar {
+  background: rgba(8, 8, 8, 0.76) !important;
+  border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+
+.VPHome {
+  position: relative;
+}
+
+.VPHome::before {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  content: "";
+  background:
+    radial-gradient(circle at 20% 14%, rgba(229, 229, 229, 0.44), rgba(229, 229, 229, 0) 34%),
+    radial-gradient(circle at 80% 18%, rgba(192, 192, 192, 0.12), rgba(192, 192, 192, 0) 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.6), transparent 42%);
+}
+
+.dark .VPHome::before {
+  background:
+    radial-gradient(circle at 20% 12%, rgba(229, 229, 229, 0.1), rgba(229, 229, 229, 0) 34%),
+    radial-gradient(circle at 80% 18%, rgba(192, 192, 192, 0.06), rgba(192, 192, 192, 0) 26%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 38%);
+}
+
+.VPHome .VPHero,
+.VPHome .VPFeatures {
+  position: relative;
+  z-index: 1;
+}
+
+.VPHome .VPHero .container {
+  max-width: 1240px;
+}
+
+.VPHome .VPHero .main {
+  max-width: 640px;
+}
+
+.VPHome .name,
+.VPDoc h1,
+.VPDoc h2,
+.VPDoc h3 {
+  letter-spacing: 0.02em;
+  font-family: var(--vp-font-family-title);
+}
+
+.VPHome .name .clip {
+  background-size: 200% 200%;
+}
+
+.VPHome .text {
+  max-width: 11ch;
+  font-size: clamp(2rem, 5.2vw, 4.1rem);
+  line-height: 0.92;
+  letter-spacing: -0.05em;
+}
+
+.VPHome .tagline {
+  max-width: 560px;
+  font-size: 0.92rem;
+  line-height: 1.8;
+  color: var(--vp-c-text-2);
+}
+
+.VPHome .image-container {
+  position: relative;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.dark .VPHome .image-container {
+  background: transparent;
+  box-shadow: none;
+}
+
+.VPHome .image-bg {
+  width: clamp(230px, 28vw, 380px);
+  height: clamp(230px, 28vw, 380px);
+  border-radius: 44% 56% 60% 40% / 42% 45% 55% 58%;
+  background-image: var(--vp-home-hero-image-background-image);
+  background-size: 170% 170%;
+  background-position: 25% 35%;
+  filter: blur(16px);
+  opacity: 0.95;
+}
+
+.VPHome .image-src {
+  border-radius: 0;
+  filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.12));
+  opacity: 1;
+  mix-blend-mode: normal;
+}
+
+.dark .VPHome .image-src {
+  filter: drop-shadow(0 20px 42px rgba(0, 0, 0, 0.45));
+  opacity: 1;
+  mix-blend-mode: normal;
+}
+
+.VPButton {
+  border-radius: 999px !important;
+}
+
+.VPButton:hover {
+  box-shadow:
+    0 10px 20px rgba(0, 0, 0, 0.08),
+    0 0 0 1px rgba(192, 192, 192, 0.45);
+}
+
+.dark .VPButton:hover {
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.28);
+}
+
+.VPFeature {
+  border: 1px solid #e5e5e5;
+  border-radius: 24px !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(250, 250, 250, 0.9)) !important;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.05);
+}
+
+.dark .VPFeature {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.02)) !important;
+  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.24);
+}
+
+.VPFeature:hover {
+  border-color: rgba(192, 192, 192, 0.75);
+  box-shadow:
+    0 20px 44px rgba(0, 0, 0, 0.08),
+    0 0 0 1px rgba(229, 229, 229, 0.9);
+}
+
+.dark .VPFeature:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 28px 60px rgba(0, 0, 0, 0.34);
+}
+
+.VPFeature .icon {
+  filter: none;
+}
+
+.VPFeature:hover .icon {
+  filter: none;
+}
+
+.vp-doc a,
+.VPNavBarMenuLink,
+.VPNavBarTitle .title {
+}
+
+
+@media (max-width: 960px) {
+  .VPHome .text {
+    max-width: none;
+  }
+
+  .VPHome .tagline {
+    max-width: none;
+  }
+}
