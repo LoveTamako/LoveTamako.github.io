@@ -42,7 +42,13 @@ Thread t = new Thread( runnable );
 t.start();
 ```
 
-> Runnable将线程和任务分开，更容易与线程池等高级api配合，同时让任务类脱离了Thread的继承体系，因此更加推荐使用Runnable
+::: tip 推荐
+Runnable 将“任务”与“线程”解耦：
+- 更易与线程池等高级 API 集成
+- 避免继承 Thread，提高类的独立性
+
+因此在实际开发中更推荐使用 Runnable。
+:::
 
 ## FutureTask
 
