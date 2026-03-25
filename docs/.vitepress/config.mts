@@ -35,11 +35,13 @@ export default defineConfig({
                 { text: '1.3. 应用', link: '/java/juc/process-thread/use-cases' }
               ]
             },
-              {
+            {
               text: '2. Java线程',
               collapsed: true,
               items: [
                 { text: '2.1. 创建和运行线程', link: '/java/juc/java-thread/create-run-thread' },
+                { text: '2.2. 查看进程线程', link: '/java/juc/java-thread/process-and-thread-monitoring' },
+      
               ]
             },
             { text: '线程基础', link: '/java/juc/thread-basics' },

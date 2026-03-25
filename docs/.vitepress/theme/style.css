@@ -439,10 +439,10 @@ body {
 /* Larger, JetBrains-like rendering */
 .vp-doc div[class*="language-"] > pre,
 .vp-doc pre code {
-  font-size: 1rem;           /* was 0.92rem */
-  line-height: 1.7;          /* was 1.65 */
+  font-size: 1em;
+  line-height: 1.7;
   font-variant-ligatures: contextual;
-  font-feature-settings: "calt" 1, "liga" 1, "tnum" 1; /* JetBrains Mono features */
+  font-feature-settings: "calt" 1, "liga" 1, "tnum" 1;
 }
 
 /* Inline code slightly larger but unobtrusive */
