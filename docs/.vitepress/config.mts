@@ -45,12 +45,6 @@ export default defineConfig({
                 { text: '2.4. 常见方法', link: '/java/juc/java-thread/thread-methods' },
               ]
             },
-            { text: '线程基础', link: '/java/juc/thread-basics' },
-            { text: '锁机制', link: '/java/juc/locks' },
-            { text: '原子类', link: '/java/juc/atomic' },
-            { text: '并发容器', link: '/java/juc/collections' },
-            { text: '线程池', link: '/java/juc/executor' },
-            { text: '并发工具类', link: '/java/juc/tools' }
           ]
         }
       ]
