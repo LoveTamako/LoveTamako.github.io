@@ -95,9 +95,11 @@ Thread.sleep(100);
 t.interrupt();  // 设置中断标志
 ```
 
-### 两阶段终止模式
+### 并发设计模式-两阶段终止
 
-优雅地停止线程的设计模式，确保线程在终止前完成必要的清理工作。
+Two Phase Termination
+
+优雅地停止另一个线程的设计模式，确保线程在终止前完成必要的清理工作。
 
 ```java
 public class TwoPhaseTermination {
@@ -108,20 +110,23 @@ public class TwoPhaseTermination {
         monitor = new Thread(() -> {
             while (true) {
                 if (Thread.currentThread().isInterrupted()) {
-                    // 第二阶段：执行清理工作
+                    // 第二阶段：线程检测到中断信号后，执行清理工作并退出
                     System.out.println("执行清理工作...");
                     break;
                 }
+
                 try {
-                    Thread.sleep(1000);  // 情况1：sleep 中被打断
+                    Thread.sleep(1000);  // 模拟监控任务间隔，期间可能被中断
                     // 执行监控任务
                     System.out.println("执行监控任务");
                 } catch (InterruptedException e) {
-                    // 情况2：sleep 期间被打断，重新设置中断标志
+                    // sleep 期间被中断，抛出 InterruptedException
+                    // 重新设置中断标志，保证外层循环能检测到中断信号
                     Thread.currentThread().interrupt();
                 }
             }
         }, "monitor");
+
         monitor.start();
     }
 
@@ -136,6 +141,29 @@ public class TwoPhaseTermination {
 - **第一阶段**：通过 `interrupt()` 发出停止信号
 - **第二阶段**：线程检测到中断后执行清理工作再退出
 - 在 `catch (InterruptedException)` 中需要重新设置中断标志，因为异常会清除标志
+:::
+
+### 打断park线程
+
+`LockSupport.park()` 会让线程进入 WAITING 状态，可以通过 `interrupt()` 打断。
+
+```java
+Thread t = new Thread(() -> {
+    System.out.println("park...");
+    LockSupport.park();  // 线程暂停
+    System.out.println("打断标志：" + Thread.currentThread().isInterrupted());  // true
+    System.out.println("继续执行");
+});
+
+t.start();
+Thread.sleep(1000);
+t.interrupt();  // 打断 park 线程
+```
+
+::: warning park 与 interrupt 的关系
+- `interrupt()` 可以打断 park 线程，但不会清除中断标志
+- 如果线程已经被中断（标志为 true），再次调用 `park()` 会失效，线程不会暂停
+- 需要使用 `Thread.interrupted()` 清除标志后，`park()` 才能再次生效
 :::
 
 ### interrupted() vs isInterrupted()
@@ -220,6 +248,8 @@ System.out.println(t.isAlive());   // true
 | getName()       | ❌     | 获取线程名称     | 常用于日志和调试       |
 | setName(String) | ❌     | 设置线程名称     | 便于调试和问题排查     |
 | currentThread() | ✅     | 获取当前线程对象 | 常用于定位当前执行线程 |
+| setDaemon(boolean) | ❌  | 设置为守护线程   | 必须在 start() 之前调用 |
+| isDaemon()      | ❌     | 判断是否为守护线程 | 返回 boolean 值       |
 
 ### 线程命名示例
 
@@ -231,5 +261,36 @@ Thread t = new Thread(() -> {
 
 t.start();  // 输出：当前线程：MyThread
 ```
+
+### 守护线程（Daemon Thread）
+
+守护线程是为其他线程提供服务的后台线程，当所有非守护线程结束时，JVM 会自动退出，守护线程也会被强制终止。
+
+```java
+Thread daemon = new Thread(() -> {
+    while (true) {
+        System.out.println("守护线程运行中...");
+        try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            break;
+        }
+    }
+});
+
+daemon.setDaemon(true);  // 设置为守护线程，必须在 start() 之前
+daemon.start();
+
+Thread.sleep(2000);
+System.out.println("主线程结束");
+// JVM 退出，守护线程自动终止
+```
+
+::: tip 守护线程特点
+- 必须在 `start()` 之前调用 `setDaemon(true)`
+- 当所有非守护线程结束时，守护线程会立即终止（不会执行 finally 块）
+- 典型应用：垃圾回收线程（GC）、日志记录线程、Tomcat 的 Acceptor 和 Poller 线程
+- 守护线程创建的子线程默认也是守护线程
+:::
 
 
