@@ -4,6 +4,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   base: '/',
   title: "LoveTamako个人博客",
+  lastUpdated: true,
   description: "LoveTamako个人博客",
   themeConfig: {
     logo: '/images/tamako.svg',
@@ -43,6 +44,7 @@ export default defineConfig({
                 { text: '2.2. 查看进程线程', link: '/java/juc/java-thread/process-and-thread-monitoring' },
                 { text: '2.3. 线程运行原理', link: '/java/juc/java-thread/thread-execution-model' },
                 { text: '2.4. 常见方法', link: '/java/juc/java-thread/thread-methods' },
+                { text: '2.5. 线程状态', link: '/java/juc/java-thread/thread-state' },
               ]
             },
           ]
