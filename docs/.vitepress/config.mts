@@ -47,6 +47,15 @@ export default defineConfig({
                 { text: '2.5. 线程状态', link: '/java/juc/java-thread/thread-state' },
               ]
             },
+            {
+              text: '3. 共享模型之管程',
+              collapsed: true,
+              items: [
+                { text: '3.1. 共享带来的问题', link: '/java/juc/shared-memory-monitors/shared-memory-problems' },
+                 { text: '3.1. synchronized', link: '/java/juc/shared-memory-monitors/synchronized' },
+                
+              ]
+            },
           ]
         }
       ]
