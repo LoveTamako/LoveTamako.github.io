@@ -2,26 +2,34 @@
 为避免临界区的竞态条件发生，有多种方案可以解决
 * 阻塞式方案：synchronized、lock
 * 非阻塞式方案：原子变量
+
 本次采用synchronized即俗称对象锁来解决问题
 
-### 互斥和同步的区别
-
-**互斥（Mutual Exclusion）**
-- 保证同一时刻只有一个线程进入临界区
-- 防止竞态条件
-- 例如：synchronized 保证只有一个线程执行 counter++
-
-**同步（Synchronization）**
-- 线程之间的协调和通信
-- 控制线程的执行顺序
-- 例如：wait/notify 实现生产者-消费者模式
-
-synchronized 主要解决的是**互斥**问题。
+::: tip 互斥 vs 同步
+Java 中互斥和同步都可以用 synchronized 来解决
+* 互斥（Mutual Exclusion）：保证临界区的竞态条件不发生，同一时刻只能有一个线程执行临界区代码
+* 同步（Synchronization）：由于线程执行的先后顺序不同，需要一个线程等待其他线程运行到某个点
+:::
 
 ## 语法
+**1. 同步代码块**
 ```java
-synchronized(对象){  
-    临界区
+synchronized(对象) {
+    // 临界区
+}
+```
+
+**2. 同步实例方法**
+```java
+public synchronized void method() {
+    // 临界区，锁是 this
+}
+```
+
+**3. 同步静态方法**
+```java
+public static synchronized void method() {
+    // 临界区，锁是类对象
 }
 ```
 
@@ -56,54 +64,63 @@ public static void main(String[] args) throws InterruptedException {
 }
 ```
 
-通过 `synchronized` 保护临界区，保证同一时刻只有一个线程执行 counter++ 或 counter--，消除了竞态条件。
+通过 `synchronized` 保护临界区（保证了临界区代码的**原子性**），保证同一时刻只有一个线程执行 counter++ 或 counter--，消除了竞态条件。
 
-## 原理
+::: tip 视频讲解
+推荐观看以下视频深入理解：
+- [上下文切换-synchronized-理解](https://www.bilibili.com/video/BV16J411h7Rd?p=55)
+- [上下文切换-synchronized-理解](https://www.bilibili.com/video/BV16J411h7Rd?p=56)
+:::
 
-### 对象锁机制
+### 面向对象写法改进
 
-Java 中每个对象都有一个**监视器锁（Monitor Lock）**，也称为对象锁。
-
-- 当线程进入 `synchronized` 块时，会尝试获取对象的锁
-- 如果锁被其他线程持有，当前线程会被阻塞
-- 只有获得锁的线程才能执行临界区代码
-- 执行完毕后，线程释放锁，其他等待的线程才能获得锁
-
-### 字节码指令
-
-synchronized 在字节码层面使用以下指令实现：
-
-```
-monitorenter    // 进入监视器，获取对象锁
-// ... 临界区代码 ...
-monitorexit     // 退出监视器，释放对象锁
-```
-
-### 三种使用方式
-
-**1. 同步代码块**
 ```java
-synchronized(对象) {
-    // 临界区
+public class SharedMemoryProblems {
+
+    public static void main(String[] args) throws InterruptedException {
+        Counter counter = new Counter();
+
+        Thread t1 = new Thread(() -> {
+            for (int i = 0; i < 5000; i++) {
+                counter.increment();
+            }
+        });
+
+        Thread t2 = new Thread(() -> {
+            for (int i = 0; i < 5000; i++) {
+                counter.decrement();
+            }
+        });
+
+        t1.start();
+        t2.start();
+        t1.join();
+        t2.join();
+
+        System.out.println("counter = " + counter.getValue());
+    }
+}
+
+class Counter {
+    private int value = 0;
+
+    public synchronized void increment() {
+        value++;
+    }
+
+    public synchronized void decrement() {
+        value--;
+    }
+
+    public synchronized int getValue() {
+        return value;
+    }
 }
 ```
 
-**2. 同步实例方法**
-```java
-public synchronized void method() {
-    // 临界区，锁是 this
-}
-```
+## 习题
 
-**3. 同步静态方法**
-```java
-public static synchronized void method() {
-    // 临界区，锁是类对象
-}
-```
-
-### 可见性保证
-
-synchronized 不仅提供互斥，还提供**可见性**保证：
-- 线程释放锁前，对共享变量的修改对其他线程可见
-- 线程获得锁后，能看到其他线程释放锁前的修改
+synchronized线程八锁习题视频讲解：
+- [synchronized-加在方法上-习题1~2](https://www.bilibili.com/video/BV16J411h7Rd?p=61)
+- [synchronized-加在方法上-习题3~4](https://www.bilibili.com/video/BV16J411h7Rd?p=62)
+- [synchronized-加在方法上-习题5~8](https://www.bilibili.com/video/BV16J411h7Rd?p=63)
