@@ -8,6 +8,9 @@ export default defineConfig({
   description: "LoveTamako个人博客",
   themeConfig: {
     logo: '/images/tamako.svg',
+    outline: {
+      level: [2, 3] // 显示 h2 ~ h4
+    },
     // https://vitepress.dev/reference/default-theme-config
     nav: [
       { text: '首页', link: '/' },
