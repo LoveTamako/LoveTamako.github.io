@@ -176,3 +176,11 @@ if (hashtable.get("key") == null) {
 
 - [线程安全分析-实例分析 1~3](https://www.bilibili.com/video/BV16J411h7Rd?p=69)
 - [线程安全分析-实例分析 4~7](https://www.bilibili.com/video/BV16J411h7Rd?p=70)
+
+## 习题
+
+- [习题-卖票-读题](https://www.bilibili.com/video/BV16J411h7Rd?p=71)
+- [习题-卖票-测试方法](https://www.bilibili.com/video/BV16J411h7Rd?p=72)
+- [习题-卖票-解题](https://www.bilibili.com/video/BV16J411h7Rd?p=73)
+- [习题-转账](https://www.bilibili.com/video/BV16J411h7Rd?p=74)
+
