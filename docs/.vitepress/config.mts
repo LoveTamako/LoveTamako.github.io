@@ -58,6 +58,7 @@ export default defineConfig({
                 { text: '3.2. synchronized', link: '/java/juc/shared-memory-monitors/synchronized' },
                 { text: '3.3. 线程安全分析', link: '/java/juc/shared-memory-monitors/thread-safety-analysis' },
                 { text: '3.4. Monitor', link: '/java/juc/shared-memory-monitors/monitor' },
+                { text: '3.5. synchronized原理进阶', link: '/java/juc/shared-memory-monitors/synchronized-internals' },
               ]
             },
           ]

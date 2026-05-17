@@ -32,6 +32,15 @@ public static synchronized void method() {
     // 临界区，锁是类对象
 }
 ```
+等价于：
+
+```java
+synchronized (A.class) {
+    // 临界区
+}
+```
+
+这里锁的不是实例对象，而是该类在 JVM 中唯一的 Class 对象。
 
 ## 解决上一章的临界区问题
 
