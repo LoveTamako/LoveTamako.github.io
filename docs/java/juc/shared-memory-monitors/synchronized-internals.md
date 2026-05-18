@@ -2,8 +2,6 @@
 
 ## 轻量级锁
 
-### 概述
-
 轻量级锁是 JVM 在 synchronized 中用于无竞争或极低竞争场景的一种优化锁机制，它的核心目标是在不进入操作系统阻塞的情况下完成同步控制。
 
 ### 示例场景
@@ -70,3 +68,44 @@ public static void method2() {
 
 - **成功**：则解锁成功
 - **失败**：说明轻量级锁进行了锁膨胀或已经升级为重量级锁，进入重量级锁解锁流程
+
+## 锁膨胀
+
+如果在尝试加轻量级锁的过程中，CAS 操作无法成功，这时有一种情况就是其他线程对此对象加上了轻量级锁（有竞争），这时需要进行锁膨胀，将轻量级锁变为重量级锁。
+
+### 示例场景
+
+```java
+static final Object obj = new Object();
+
+public static void method1() {
+    synchronized (obj) {
+        // 同步块
+    }
+}
+```
+
+### 膨胀流程
+
+#### 1. 竞争检测
+
+当 Thread-1 进行轻量级锁加锁时，Thread-0 已经对该对象加了轻量级锁。
+
+![线程竞争状态](thread-safety-analysis.assets/image9.png)
+
+#### 2. 锁膨胀过程
+
+这时 Thread-1 加轻量级锁失败，进入锁膨胀过程：
+
+- 为 Object 对象申请 Monitor 锁，让 Object 指向重量级锁地址
+- 然后自己进入 Monitor 的 EntryList BLOCKED
+
+![锁膨胀完成](thread-safety-analysis.assets/image10.png)
+
+#### 3. 重量级锁解锁
+
+当 Thread-0 退出同步块解锁时，使用 CAS 将 Mark Word 的值恢复给对象头，失败。这时会进入重量级锁解锁流程：
+
+- 按照 Monitor 地址找到 Monitor 对象
+- 设置 Owner 为 null
+- 唤醒 EntryList 中 BLOCKED 线程
