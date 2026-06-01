@@ -469,3 +469,45 @@ body {
 
 /* Slightly more padding to match larger size */
 .vp-doc pre, .vp-doc pre code { padding: 16px 18px !important; }
+
+/* --- Search box styling --- */
+.DocSearch-Button {
+  background: rgba(246, 246, 243, 0.72) !important;
+  border: 1px solid rgba(192, 192, 192, 0.45) !important;
+  border-radius: 999px !important;
+  backdrop-filter: blur(18px);
+  transition: all 0.2s ease;
+}
+
+.DocSearch-Button:hover {
+  background: rgba(241, 241, 241, 0.85) !important;
+  border-color: rgba(168, 168, 168, 0.65) !important;
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(192, 192, 192, 0.45);
+}
+
+.dark .DocSearch-Button {
+  background: rgba(8, 8, 8, 0.76) !important;
+  border-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+.dark .DocSearch-Button:hover {
+  background: rgba(17, 17, 17, 0.85) !important;
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.28);
+}
+
+.DocSearch-Button-Placeholder,
+.DocSearch-Button .DocSearch-Search-Icon {
+  color: var(--vp-c-text-2) !important;
+}
+
+.dark .DocSearch-Button-Placeholder,
+.dark .DocSearch-Button .DocSearch-Search-Icon {
+  color: var(--vp-c-text-2) !important;
+}
+
+.DocSearch-Button-Keys {
+  border-radius: 6px !important;
+  background: var(--vp-c-bg-soft) !important;
+  border: 1px solid var(--vp-c-divider) !important;
+}
