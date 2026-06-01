@@ -313,6 +313,290 @@ public final synchronized void join(long millis) throws InterruptedException {
 如果无法严格保证"任意一个被唤醒的线程都能继续执行"，优先使用 `notifyAll()` 配合 `while` 条件检查。这是最稳妥、最不容易出错的写法。
 :::
 
+### 扩展应用：解耦等待与生产
+
+在 RPC 框架中，常见的场景是**多个线程同时发起请求，一个或多个 IO 线程接收响应**。这需要将"等待线程"和"生产结果的线程"解耦。
+
+![解耦等待与生产示意图](thread-safety-analysis.assets/decoupled-waiting-production.png)
+
+**核心思路：**
+
+- 使用 `Map<Integer, GuardedObject>` 管理多个等待对象
+- 每个请求分配唯一 ID
+- 请求线程创建 `GuardedObject` 并等待
+- IO 线程根据响应 ID 找到对应的 `GuardedObject` 并填充结果
+
+**实现示例：**
+
+```java
+public class Mailboxes {
+    private static final Map<Integer, GuardedObject> boxes = new ConcurrentHashMap<>();
+    private static final AtomicInteger idGenerator = new AtomicInteger(0);
+
+    // 生成唯一 ID
+    public static int generateId() {
+        return idGenerator.incrementAndGet();
+    }
+
+    // 创建 GuardedObject 并注册
+    public static GuardedObject createGuardedObject() {
+        GuardedObject go = new GuardedObject(generateId());
+        boxes.put(go.getId(), go);
+        return go;
+    }
+
+    // 根据 ID 获取 GuardedObject
+    public static GuardedObject getGuardedObject(int id) {
+        return boxes.remove(id);
+    }
+
+    // 获取所有等待中的 ID
+    public static Set<Integer> getIds() {
+        return boxes.keySet();
+    }
+}
+
+public class GuardedObject {
+    private final int id;
+    private Object response;
+
+    public GuardedObject(int id) {
+        this.id = id;
+    }
+
+    public int getId() {
+        return id;
+    }
+
+    // 等待结果
+    public Object get(long timeout) {
+        synchronized (this) {
+            long start = System.currentTimeMillis();
+            long remaining = timeout;
+
+            while (response == null && remaining > 0) {
+                try {
+                    this.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                remaining = timeout - (System.currentTimeMillis() - start);
+            }
+
+            return response;
+        }
+    }
+
+    // 填充结果
+    public void complete(Object response) {
+        synchronized (this) {
+            this.response = response;
+            this.notifyAll();
+        }
+    }
+}
+```
+
+**使用场景：**
+
+```java
+// 客户端线程 - 发起请求
+public class RpcClient {
+    public Object call(String request) {
+        // 1. 创建 GuardedObject
+        GuardedObject go = Mailboxes.createGuardedObject();
+        int id = go.getId();
+
+        // 2. 发送请求（带上 ID）
+        sendRequest(id, request);
+
+        // 3. 等待响应
+        return go.get(3000);
+    }
+}
+
+// IO 线程 - 接收响应
+public class RpcHandler {
+    public void onResponse(int id, Object response) {
+        // 根据 ID 找到对应的 GuardedObject
+        GuardedObject go = Mailboxes.getGuardedObject(id);
+        if (go != null) {
+            // 填充结果，唤醒等待线程
+            go.complete(response);
+        }
+    }
+}
+```
+
+**关键特点：**
+
+- **解耦**：请求线程和响应处理线程完全分离
+- **多对多**：支持多个客户端线程和多个 IO 线程
+- **路由**：通过 ID 将响应准确路由到对应的等待线程
+- **实际应用**：Dubbo 的 `DefaultFuture`、Netty 的 `Promise` 都采用类似设计
+
+## 并发设计模式：生产者-消费者模式
+
+**生产者-消费者模式**通过一个共享队列解耦生产者和消费者线程，实现异步处理和流量控制。
+
+![生产者-消费者模式示意图](thread-safety-analysis.assets/producer-consumer-pattern.png)
+
+### 模式特点
+
+与 Guarded Suspension 的对比：
+
+| 特性 | Guarded Suspension | 生产者-消费者 |
+|------|-------------------|--------------|
+| 线程关系 | 一对一，等待特定结果 | 多对多，通过队列解耦 |
+| 结果关联 | 生产者和消费者一一对应 | 不关心谁生产、谁消费 |
+| 队列作用 | 传递单个结果 | 缓冲多个任务，平衡速率 |
+| 典型应用 | RPC 调用、Future | 线程池、消息队列 |
+
+**核心特点：**
+
+- **解耦**：生产者只负责生产数据，消费者只负责处理数据
+- **异步**：生产和消费可以不同步进行
+- **缓冲**：队列可以平衡生产和消费的速率差异
+- **容量限制**：队列满时生产者阻塞，队列空时消费者阻塞
+
+### 实现示例
+
+使用 `wait/notify` 实现一个简单的阻塞队列：
+
+```java
+public class MessageQueue {
+    private final LinkedList<Message> queue = new LinkedList<>();
+    private final int capacity;
+
+    public MessageQueue(int capacity) {
+        this.capacity = capacity;
+    }
+
+    // 生产者：放入消息
+    public void put(Message message) throws InterruptedException {
+        synchronized (queue) {
+            // 队列满时等待
+            while (queue.size() == capacity) {
+                System.out.println("队列已满，生产者等待");
+                queue.wait();
+            }
+
+            // 放入消息
+            queue.addLast(message);
+            System.out.println("生产消息：" + message);
+
+            // 唤醒等待的消费者
+            queue.notifyAll();
+        }
+    }
+
+    // 消费者：取出消息
+    public Message take() throws InterruptedException {
+        synchronized (queue) {
+            // 队列空时等待
+            while (queue.isEmpty()) {
+                System.out.println("队列为空，消费者等待");
+                queue.wait();
+            }
+
+            // 取出消息
+            Message message = queue.removeFirst();
+            System.out.println("消费消息：" + message);
+
+            // 唤醒等待的生产者
+            queue.notifyAll();
+
+            return message;
+        }
+    }
+}
+
+class Message {
+    private final int id;
+    private final String content;
+
+    public Message(int id, String content) {
+        this.id = id;
+        this.content = content;
+    }
+
+    @Override
+    public String toString() {
+        return "Message{id=" + id + ", content='" + content + "'}";
+    }
+}
+```
+
+### 使用示例
+
+```java
+public class ProducerConsumerDemo {
+    public static void main(String[] args) {
+        MessageQueue queue = new MessageQueue(3);
+
+        // 启动 3 个生产者
+        for (int i = 0; i < 3; i++) {
+            int producerId = i;
+            new Thread(() -> {
+                for (int j = 0; j < 5; j++) {
+                    try {
+                        queue.put(new Message(producerId * 100 + j, "来自生产者" + producerId));
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }, "生产者-" + i).start();
+        }
+
+        // 启动 2 个消费者
+        for (int i = 0; i < 2; i++) {
+            new Thread(() -> {
+                while (true) {
+                    try {
+                        queue.take();
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }, "消费者-" + i).start();
+        }
+    }
+}
+```
+
+### 关键设计
+
+1. **双向阻塞**：
+   - 队列满时，生产者调用 `wait()` 阻塞
+   - 队列空时，消费者调用 `wait()` 阻塞
+
+2. **双向唤醒**：
+   - 生产者放入消息后，调用 `notifyAll()` 唤醒消费者
+   - 消费者取出消息后，调用 `notifyAll()` 唤醒生产者
+
+3. **使用 notifyAll()**：
+   - 因为有两类等待条件（队列满/空）
+   - 使用 `notifyAll()` 确保正确的线程被唤醒
+
+### JDK 中的应用
+
+JDK 提供了多种现成的阻塞队列实现，都采用生产者-消费者模式：
+
+- **ArrayBlockingQueue**：基于数组的有界阻塞队列
+- **LinkedBlockingQueue**：基于链表的可选有界阻塞队列
+- **PriorityBlockingQueue**：支持优先级的无界阻塞队列
+- **SynchronousQueue**：不存储元素的阻塞队列，每个 put 必须等待 take
+
+这些队列的底层实现使用了更高效的 `Condition`（基于 `Lock` 的 wait/notify 机制），但核心思想相同。
+
+::: tip 工程实践
+在实际开发中，优先使用 JDK 提供的 `BlockingQueue` 实现，而不是自己用 wait/notify 实现。它们经过充分优化和测试，更加可靠高效。
+:::
+
 ## 常见错误与排查
 
 ### 1. 没有持有锁就调用 wait / notify
