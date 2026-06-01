@@ -38,6 +38,16 @@
 5. 通知线程退出同步块并释放锁后，被唤醒线程重新竞争锁
 6. 竞争成功后，`wait()` 才真正返回，线程继续向下执行
 
+::: tip 理解 wait() 的执行位置
+可以把 `wait()` 理解为在代码执行位置打了一个"断点"：线程在此处暂停，被唤醒后会从这个位置继续执行。
+
+但与真正的断点不同，`wait()` 返回前线程必须**重新获取锁**。因此完整的恢复过程是：
+1. 被唤醒（从 `WaitSet` 转移到 `EntryList`）
+2. 竞争锁（可能需要等待其他线程释放锁）
+3. 获取锁成功后，`wait()` 才返回
+4. 从 `wait()` 的下一行代码继续执行
+:::
+
 ## API 语义与约束
 
 ### 方法总览
@@ -67,18 +77,25 @@
   - 发生虚假唤醒
 
 ::: warning 为什么必须用 while，而不是 if
-`wait / notify` 不是“信号计数器”，不会记住历史通知；同时 JVM 也允许虚假唤醒。
+`wait / notify` 不是"信号计数器"，不会记住历史通知；同时 JVM 允许**虚假唤醒（Spurious Wakeup）**——线程可能在没有被显式唤醒的情况下从 `wait()` 返回（这是操作系统底层条件变量实现的特性，JVM 规范明确允许）。
 
-因此标准写法必须是：
+**标准写法：**
 
 ```java
 synchronized (lock) {
-    while (!condition) {
-        lock.wait();
+    while (!condition) {  // 必须用 while，不能用 if
+        lock.wait();      // 线程挂起，释放 CPU
     }
     // 条件满足，继续执行
 }
 ```
+
+**为什么 `while` 是正确的？**
+
+- 应对虚假唤醒：被唤醒后重新检查条件
+- 处理多线程竞争：其他线程可能抢先消费了条件
+- 处理 `notifyAll()`：多个线程被唤醒，但只有部分条件真正满足
+- **不占用 CPU**：`wait()` 会让线程进入 `WAITING` 状态并挂起，只有被唤醒后才会重新执行循环检查，与忙等待（busy waiting）完全不同
 
 如果写成 `if`，线程被唤醒后不会再次检查条件，容易导致逻辑错误。
 :::
@@ -186,9 +203,27 @@ public final class MultiWaiterDemo {
 - 需要“**释放锁并等待条件变化**”时，用 `wait(timeout)`
 - 只想“**让当前线程暂停一会儿**”时，用 `sleep(timeout)`
 
-## 标准用法：保护性暂停（Guarded Suspension）
+## 并发设计模式：保护性暂停（Guarded Suspension）
 
-下面用一个“等待结果准备完成”的例子来说明 `wait / notify` 的标准写法：
+**Guarded Suspension** 是一种同步设计模式，用于一个线程等待另一个线程的执行结果。
+
+![Guarded Suspension 模式示意图](thread-safety-analysis.assets/guarded-suspension-pattern.png)
+
+### 模式特点
+
+- **守护条件**：线程需要等待某个条件满足才能继续执行
+- **结果传递**：通过共享的 `GuardedObject` 在线程间传递结果
+- **同步等待**：等待线程会被挂起，而不是忙等待
+
+### 典型应用
+
+- `Thread.join()`：一个线程等待另一个线程执行完成
+- `Future.get()`：等待异步任务返回结果
+- 异步转同步：将异步回调转换为同步等待
+
+### 实现示例
+
+**GuardedObject 实现：**
 
 ```java
 public final class GuardedObject {
@@ -207,14 +242,17 @@ public final class GuardedObject {
 
     public Object get(long timeout) throws InterruptedException {
         synchronized (lock) {
-            long start = System.currentTimeMillis();
-            long remaining = timeout;
+            long start = System.currentTimeMillis();  // 记录开始时间
+            long remaining = timeout;                  // 剩余等待时间
 
+            // 循环检查条件和剩余时间
             while (!ready && remaining > 0) {
-                lock.wait(remaining);
+                lock.wait(remaining);  // 等待剩余时间（而不是固定的 timeout）
+                // 重新计算剩余时间，防止虚假唤醒导致总等待时间超过 timeout
                 remaining = timeout - (System.currentTimeMillis() - start);
             }
 
+            // 超时返回 null，条件满足返回结果
             return ready ? response : null;
         }
     }
@@ -229,14 +267,50 @@ public final class GuardedObject {
 }
 ```
 
-### 代码要点
+**实现要点：**
 
-- **等待方**使用 `while (!ready)` 循环检查条件，避免虚假唤醒
-- **通知方**先更新共享状态，再调用 `notifyAll()`，且整个过程必须在同一把锁内完成
-- **超时等待**不能每次都固定 `wait(timeout)`，而是要根据已等待时间计算剩余时间，否则总等待时间可能超过预期
+- **等待方**：使用 `while (!ready)` 循环检查条件，避免虚假唤醒
+- **通知方**：先更新共享状态，再调用 `notifyAll()`，整个过程在同一把锁内完成
+- **超时处理**：动态计算剩余时间，确保总等待时间不超过预期
+
+### Thread.join()原理
+
+`Thread.join()` 就是使用 Guarded Suspension 模式实现的经典案例。简化后的源码：
+
+```java
+public final synchronized void join(long millis) throws InterruptedException {
+    long base = System.currentTimeMillis();
+    long now = 0;
+
+    if (millis == 0) {
+        // 无限等待版本
+        while (isAlive()) {
+            wait(0);  // 等待线程结束
+        }
+    } else {
+        // 超时等待版本
+        while (isAlive()) {
+            long delay = millis - now;
+            if (delay <= 0) {
+                break;  // 超时退出
+            }
+            wait(delay);
+            now = System.currentTimeMillis() - base;
+        }
+    }
+}
+```
+
+**关键设计：**
+
+- **守护条件**：`isAlive()` - 等待目标线程执行完成
+- **锁对象**：方法是 `synchronized`，锁就是线程对象本身
+- **循环检查**：使用 `while` 循环应对虚假唤醒
+- **超时计算**：与 `GuardedObject` 相同的剩余时间计算逻辑
+- **自动通知**：线程结束时，JVM 会自动调用该线程对象的 `notifyAll()`
 
 ::: tip 工程建议
-如果无法严格保证“任意一个被唤醒的线程都能继续执行”，优先使用 `notifyAll()` 配合 `while` 条件检查。这是最稳妥、最不容易出错的写法。
+如果无法严格保证"任意一个被唤醒的线程都能继续执行"，优先使用 `notifyAll()` 配合 `while` 条件检查。这是最稳妥、最不容易出错的写法。
 :::
 
 ## 常见错误与排查
