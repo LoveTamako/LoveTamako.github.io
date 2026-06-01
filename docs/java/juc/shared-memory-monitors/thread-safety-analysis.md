@@ -55,7 +55,7 @@ public static void main(String[] args) {
 
 多线程操作的是同一个 `ThreadUnsafe` 实例中的 `list`。`ArrayList` 不是线程安全容器，在并发 `add/remove` 时可能出现竞态条件（例如 `IndexOutOfBoundsException`）。
 
-![成员变量共享示意图](thread-safety-analysis.assets/image.png)
+![成员变量共享示意图](thread-safety-analysis.assets/member-variable-sharing.png)
 
 ## 局部变量
 
@@ -91,7 +91,7 @@ class ThreadSafe {
 
 这里的 `list` 是 `method1` 的局部变量。每个线程调用 `method1` 时都会创建自己的 `list` 实例，因此不存在共享。
 
-![局部变量线程私有示意图](thread-safety-analysis.assets/image1.png)
+![局部变量线程私有示意图](thread-safety-analysis.assets/local-variable-thread-private.png)
 
 ### 示例：局部变量引用逃逸（可能不安全）
 
@@ -158,7 +158,7 @@ if (hashtable.get("key") == null) {
 
 答案：**不安全**。`get` 与 `put` 之间存在竞态窗口，两个线程都可能通过判断，导致复合逻辑失效。
 
-![复合操作竞态示意图](thread-safety-analysis.assets/image2.png)
+![复合操作竞态示意图](thread-safety-analysis.assets/race-condition-compound-operation.png)
 
 如果需要“检查并写入”这类复合原子语义，应使用专门的原子复合操作（如 `ConcurrentHashMap#putIfAbsent`）或显式加锁。
 

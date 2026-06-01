@@ -39,19 +39,19 @@ public static void method2() {
 
 创建锁记录（Lock Record）对象，每个线程的栈帧都会包含一个锁记录的结构，内部可以存储锁定对象的 Mark Word。
 
-![锁记录结构](thread-safety-analysis.assets/image4.png)
+![锁记录结构](thread-safety-analysis.assets/lock-record-structure.png)
 
 #### 2. 尝试 CAS 替换
 
 让锁记录中 Object Reference 指向锁对象，并尝试用 CAS 替换 Object 的 Mark Word，将 Mark Word 的值存入锁记录。
 
-![CAS 替换过程](thread-safety-analysis.assets/image5.png)
+![CAS 替换过程](thread-safety-analysis.assets/cas-replacement-process.png)
 
 #### 3. CAS 成功
 
 如果 CAS 替换成功，对象头中存储了锁记录地址和状态 `00`，表示由该线程给对象加锁。
 
-![加锁成功状态](thread-safety-analysis.assets/image6.png)
+![加锁成功状态](thread-safety-analysis.assets/lock-success-state.png)
 
 #### 4. CAS 失败
 
@@ -60,7 +60,7 @@ public static void method2() {
 - **其他线程持有锁**：如果是其他线程已经持有了该 Object 的轻量级锁，这时表明有竞争，进入锁膨胀过程
 - **锁重入**：如果是自己执行了 synchronized 锁重入，那么再添加一条 Lock Record 作为重入的计数
 
-![锁重入示意](thread-safety-analysis.assets/image7.png)
+![锁重入示意](thread-safety-analysis.assets/lock-reentry.png)
 
 ### 解锁流程
 
@@ -68,7 +68,7 @@ public static void method2() {
 
 当退出 synchronized 代码块（解锁）时，如果有值为 `null` 的锁记录，表示有重入，这时重置锁记录，表示重入次数减一。
 
-![重入锁解锁](thread-safety-analysis.assets/image8.png)
+![重入锁解锁](thread-safety-analysis.assets/reentry-lock-unlock.png)
 
 #### 2. 正常解锁
 
@@ -99,7 +99,7 @@ public static void method1() {
 
 当 Thread-1 进行轻量级锁加锁时，Thread-0 已经对该对象加了轻量级锁。
 
-![线程竞争状态](thread-safety-analysis.assets/image9.png)
+![线程竞争状态](thread-safety-analysis.assets/thread-contention-state.png)
 
 #### 2. 锁膨胀过程
 
@@ -108,7 +108,7 @@ public static void method1() {
 - 为 Object 对象申请 Monitor 锁，让 Object 指向重量级锁地址
 - 然后自己进入 Monitor 的 EntryList BLOCKED
 
-![锁膨胀完成](thread-safety-analysis.assets/image10.png)
+![锁膨胀完成](thread-safety-analysis.assets/lock-inflation-complete.png)
 
 #### 3. 重量级锁解锁
 
@@ -218,8 +218,8 @@ public static void method3() {
 
 在上述代码中，同一个线程连续三次获取同一个锁对象。使用偏向锁后，只有第一次需要 CAS 操作，后续两次重入都无需 CAS，直接检查线程 ID 即可。
 
-![偏向锁加锁流程](thread-safety-analysis.assets/image11.png)
-![偏向锁状态转换](thread-safety-analysis.assets/image12.png)
+![偏向锁加锁流程](thread-safety-analysis.assets/biased-lock-flow.png)
+![偏向锁状态转换](thread-safety-analysis.assets/biased-lock-state-transition.png)
 
 ### 偏向状态
 
