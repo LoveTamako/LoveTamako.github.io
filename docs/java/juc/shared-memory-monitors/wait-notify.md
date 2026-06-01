@@ -662,8 +662,36 @@ synchronized (lock) {
 
 ## 总结
 
-- `wait / notify` 是基于 `Monitor` 的线程协作机制，解决的是“条件不满足时如何等待”的问题
-- 调用 `wait()` 的线程会释放锁并进入 `WaitSet`；被通知后还需要重新竞争锁
-- `notify()` 只唤醒一个线程，`notifyAll()` 唤醒全部线程，但二者都不会立即释放锁
-- 标准写法是 `while(条件不满足) { wait(); }`
-- 多条件共享同一把锁时，优先使用 `notifyAll()` 配合 `while`，正确性更高
+### 核心机制
+
+- `wait/notify` 是基于 **Monitor（管程）** 的线程协作机制，解决"条件不满足时如何等待"的问题
+- 调用 `wait()` 会**释放锁**并进入 `WaitSet`，线程被挂起不占用 CPU
+- 被唤醒后需要**重新竞争锁**，获取锁成功后 `wait()` 才返回，从调用位置继续执行
+- `notify()` 唤醒一个线程，`notifyAll()` 唤醒全部线程，但都**不会立即释放锁**
+
+### 使用规范
+
+- **标准写法**：`while (!condition) { wait(); }` - 必须用 `while` 而不是 `if`
+- **虚假唤醒**：JVM 允许线程在没有被显式唤醒的情况下从 `wait()` 返回，`while` 循环可以应对
+- **选择 notifyAll()**：多条件共享同一把锁时，优先使用 `notifyAll()` 配合 `while`，正确性更高
+- **超时处理**：使用 `wait(timeout)` 时要动态计算剩余时间，避免总等待时间超出预期
+
+### 设计模式应用
+
+**Guarded Suspension（保护性暂停）**
+- 一对一等待特定结果
+- 典型应用：`Thread.join()`、`Future.get()`
+
+**解耦等待与生产**
+- 多对多，通过 Map + ID 路由响应
+- 典型应用：RPC 框架（Dubbo、Netty）
+
+**生产者-消费者模式**
+- 通过队列解耦，异步处理，流量控制
+- 典型应用：线程池、消息队列、`BlockingQueue`
+
+### 工程实践
+
+- 实际开发中优先使用更高层的并发工具：`BlockingQueue`、`CountDownLatch`、`Condition`、`CompletableFuture`
+- 只在理解底层原理或实现自定义同步器时才直接使用 `wait/notify`
+- 避免常见错误：未持有锁调用、用 `if` 判断条件、等待和通知使用不同锁对象
