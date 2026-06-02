@@ -81,6 +81,8 @@ export default defineConfig({
                 { text: '3.5. synchronized原理进阶', link: '/java/juc/shared-memory-monitors/synchronized-internals' },
                 { text: '3.6. wait & notify', link: '/java/juc/shared-memory-monitors/wait-notify' },
                 { text: '3.7. park & unpark', link: '/java/juc/shared-memory-monitors/park-unpark' },
+                { text: '3.8. 线程状态转换', link: '/java/juc/shared-memory-monitors/rethinking-thread-state-transitions' },
+
               ]
             },
           ]
