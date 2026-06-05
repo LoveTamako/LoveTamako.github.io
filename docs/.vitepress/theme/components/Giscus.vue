@@ -6,9 +6,10 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
-import { useData } from 'vitepress'
+import { useData, useRoute } from 'vitepress'
 
 const { isDark } = useData()
+const route = useRoute()
 const giscusRef = ref<HTMLElement>()
 
 const loadGiscus = () => {
@@ -41,22 +42,38 @@ onMounted(() => {
   loadGiscus()
 })
 
+const sendMessage = (message: object) => {
+  const iframe = document.querySelector<HTMLIFrameElement>(
+    'iframe.giscus-frame'
+  )
+
+  if (!iframe) return
+
+  iframe.contentWindow?.postMessage(
+    {
+      giscus: message
+    },
+    'https://giscus.app'
+  )
+}
 // 监听主题变化
 watch(isDark, () => {
-  const iframe = document.querySelector<HTMLIFrameElement>('iframe.giscus-frame')
-  if (iframe) {
-    iframe.contentWindow?.postMessage(
-      {
-        giscus: {
-          setConfig: {
-            theme: isDark.value ? 'dark' : 'light'
-          }
-        }
-      },
-      'https://giscus.app'
-    )
-  }
+  sendMessage({
+    setConfig: {
+      theme: isDark.value ? 'dark' : 'light'
+    }
+  })
 })
+
+// 监听路由变化，切换文章时刷新评论
+watch(
+  () => route.path,
+  (path, oldPath) => {
+    if (path === oldPath) return
+
+    loadGiscus()
+  }
+)
 </script>
 
 <style scoped>
