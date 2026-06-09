@@ -1,5 +1,5 @@
 <template>
-  <div class="giscus-container">
+  <div v-if="isProduction" class="giscus-container">
     <div ref="giscusRef"></div>
   </div>
 </template>
@@ -7,6 +7,8 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { useData, useRoute } from 'vitepress'
+
+const isProduction = import.meta.env.PROD
 
 const { isDark } = useData()
 const route = useRoute()
