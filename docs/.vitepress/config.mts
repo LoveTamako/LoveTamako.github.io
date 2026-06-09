@@ -89,6 +89,14 @@ export default defineConfig({
                 { text: '3.12. 同步模式之顺序控制', link: '/java/juc/shared-memory-monitors/order-control' },
               ]
             },
+            {
+              text: '4. 共享模型之内存',
+              link: '/java/juc/shared-memory-model/overview',
+              collapsed: true,
+              items: [
+                { text: '4.1. Java 内存模型', link: '/java/juc/shared-memory-model/java-memory-model' },
+              ]
+            },
           ]
         }
       ]
