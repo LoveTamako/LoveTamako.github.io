@@ -85,6 +85,7 @@ export default defineConfig({
                 { text: '3.9. 多把锁', link: '/java/juc/shared-memory-monitors/multiple-locks' },
                 { text: '3.10. 活跃性', link: '/java/juc/shared-memory-monitors/liveness' },
                 { text: '3.11. ReentrantLock', link: '/java/juc/shared-memory-monitors/reentrantLock' },
+                { text: '3.12. 同步模式之顺序控制', link: '/java/juc/shared-memory-monitors/order-control' },
               ]
             },
           ]
