@@ -95,6 +95,7 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { text: '4.1. Java 内存模型', link: '/java/juc/shared-memory-model/java-memory-model' },
+                { text: '4.2. 可见性', link: '/java/juc/shared-memory-model/visibility' },
               ]
             },
           ]
