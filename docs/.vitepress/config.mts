@@ -72,6 +72,7 @@ export default defineConfig({
             },
             {
               text: '3. 共享模型之管程',
+              link: '/java/juc/shared-memory-monitors/overview',
               collapsed: true,
               items: [
                 { text: '3.1. 共享带来的问题', link: '/java/juc/shared-memory-monitors/shared-memory-problems' },
