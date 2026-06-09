@@ -95,7 +95,7 @@ Thread.sleep(100);
 t.interrupt();  // 设置中断标志
 ```
 
-### 并发设计模式-两阶段终止
+### 并发设计模式-两阶段终止 {#two-phase-termination}
 
 Two Phase Termination
 

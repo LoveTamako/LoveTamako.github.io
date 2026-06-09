@@ -96,6 +96,7 @@ export default defineConfig({
               items: [
                 { text: '4.1. Java 内存模型', link: '/java/juc/shared-memory-model/java-memory-model' },
                 { text: '4.2. 可见性', link: '/java/juc/shared-memory-model/visibility' },
+                { text: '4.3. 终止模式之两阶段终止', link: '/java/juc/shared-memory-model/two-phase-termination' },
               ]
             },
           ]
