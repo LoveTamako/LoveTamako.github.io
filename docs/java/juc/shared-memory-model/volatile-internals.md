@@ -350,33 +350,116 @@ public final class Singleton {
 
 ## happens-before
 
-happens-before 是 Java 内存模型中的核心概念，用于描述操作之间的可见性保证。
-
 ### 定义
 
 如果操作 A happens-before 操作 B，那么：
 - **操作 A 的结果对操作 B 可见**
-- **操作 A 在时间上先于操作 B 发生**（逻辑上的先后关系，不是物理时钟）
+- **操作 A 在逻辑上先于操作 B 发生**（不是物理时间顺序）
 
 ::: tip 注意
 happens-before 不是指时间上的先后顺序，而是指一种**可见性保证**：如果 A happens-before B，那么 A 的执行结果必须对 B 可见。
 :::
 
-### volatile 的 happens-before 规则
+### 作用
 
-**规则**：对一个 volatile 变量的写操作 happens-before 后续对这个 volatile 变量的读操作。
+在多线程编程中，你可能遇到过这样的困惑：
 
 ```java
-volatile boolean ready = false;
-int num = 0;
-
 // 线程 A
-num = 42;        // 1
-ready = true;    // 2: volatile 写
+data = 42;
+ready = true;
 
 // 线程 B
-if (ready) {     // 3: volatile 读
-    int result = num;  // 4: 一定能看到 num = 42
+if (ready) {
+    System.out.println(data);  // 可能输出 0！
+}
+```
+
+即使线程 B 看到 `ready = true`，也可能看不到 `data = 42`。这是因为 CPU 缓存和指令重排序会导致可见性和有序性问题。
+
+**happens-before 规则**是 Java 内存模型提供的**可见性保证机制**，定义在《Java Language Specification（JLS）》第 17.4.5 节：如果操作 A happens-before 操作 B，那么 A 的执行结果必须对 B 可见，且 A 的执行顺序排在 B 之前。
+
+::: tip 为什么要学 happens-before？
+
+不理解 happens-before，你将无法判断：
+- 为什么双重检查锁定必须用 `volatile`
+- 为什么线程间通信需要同步机制
+- `Thread.join()` 后能否安全读取子线程修改的变量
+
+理解 happens-before 能帮你写出正确的并发代码，理解 volatile、synchronized 等机制的内存语义，在设计无锁数据结构或优化性能时做出正确决策。
+
+:::
+
+### happens-before 规则
+
+#### 1. 程序顺序规则（Program Order Rule）
+
+**规则**：单线程内，按照代码顺序，前面的操作 happens-before 后续的操作。
+
+```java
+class ProgramOrderExample {
+    int a = 0;
+    int b = 0;
+
+    void method() {
+        a = 1;  // 1
+        b = 2;  // 2
+        // 在单线程内，操作 1 happens-before 操作 2
+        // 但 JVM 可能重排序（如果不影响单线程结果）
+    }
+}
+```
+
+**注意**：这只保证单线程内的逻辑顺序，不保证多线程间的可见性。
+
+#### 2. 锁规则（Monitor Lock Rule）
+
+**规则**：对锁的解锁 happens-before 后续对同一个锁的加锁。
+
+```java
+class LockExample {
+    private int count = 0;
+    private final Object lock = new Object();
+
+    // 线程 A
+    void increment() {
+        synchronized (lock) {
+            count++;
+        }  // 解锁
+    }
+
+    // 线程 B（在线程 A 之后）
+    void get() {
+        synchronized (lock) {  // 加锁
+            int value = count;  // 能看到线程 A 的修改
+        }
+    }
+}
+```
+
+**关键点**：线程 A 在同步块内的所有操作，对线程 B 获取同一锁后都可见。
+
+#### 3. volatile 规则（Volatile Variable Rule）
+
+**规则**：对 volatile 变量的写操作 happens-before 后续对这个变量的读操作。
+
+```java
+class VolatileExample {
+    volatile boolean ready = false;
+    int data = 0;
+
+    // 线程 A
+    void writer() {
+        data = 42;        // 1
+        ready = true;     // 2: volatile 写
+    }
+
+    // 线程 B
+    void reader() {
+        if (ready) {      // 3: volatile 读
+            int result = data;  // 4: 一定能看到 data = 42
+        }
+    }
 }
 ```
 
@@ -386,57 +469,137 @@ if (ready) {     // 3: volatile 读
 3. 操作 3 happens-before 操作 4（程序顺序规则）
 4. 根据传递性：操作 1 happens-before 操作 4
 
-**结论**：线程 A 中 volatile 写之前的所有操作，对线程 B 在 volatile 读之后的所有操作都可见。
+**结论**：volatile 写之前的所有操作，对后续 volatile 读之后的所有操作可见。
 
-### 常见的 happens-before 规则
+#### 4. 传递性（Transitivity）
 
-1. **程序顺序规则**：
-   - 单线程内，按照代码顺序，前面的操作 happens-before 后续的操作
+**规则**：如果 A happens-before B，B happens-before C，则 A happens-before C。
 
-2. **锁规则**：
-   - 对一个锁的解锁 happens-before 后续对这个锁的加锁
-   ```java
-   synchronized (lock) {  // 线程 A
-       x = 1;
-   }  // 解锁
+```java
+class TransitivityExample {
+    volatile boolean ready = false;
+    int data1 = 0;
+    int data2 = 0;
 
-   synchronized (lock) {  // 线程 B 后续加锁
-       int y = x;  // 能看到 x = 1
-   }
-   ```
+    // 线程 A
+    void writer() {
+        data1 = 1;        // 1
+        data2 = 2;        // 2
+        ready = true;     // 3: volatile 写
+    }
 
-3. **volatile 规则**：
-   - 对 volatile 变量的写 happens-before 后续对这个变量的读
+    // 线程 B
+    void reader() {
+        if (ready) {      // 4: volatile 读
+            // 根据传递性：
+            // 1 hb 3（程序顺序）
+            // 3 hb 4（volatile）
+            // 因此 1 hb 4，2 hb 4
+            int x = data1;  // 能看到 data1 = 1
+            int y = data2;  // 能看到 data2 = 2
+        }
+    }
+}
+```
 
-4. **传递性**：
-   - 如果 A happens-before B，B happens-before C，则 A happens-before C
+**作用**：传递性让我们可以组合多个 happens-before 规则。
 
-5. **线程启动规则**：
-   - `Thread.start()` happens-before 线程中的任何操作
-   ```java
-   int x = 0;
-   x = 42;
-   thread.start();  // start() 之前的操作对线程可见
-   ```
+#### 5. start 规则（Thread Start Rule）
 
-6. **线程终止规则**：
-   - 线程中的所有操作 happens-before 其他线程从 `Thread.join()` 返回
-   ```java
-   thread.start();
-   // 线程中: x = 42;
-   thread.join();
-   int y = x;  // 能看到 x = 42
-   ```
+**规则**：`Thread.start()` happens-before 线程中的任何操作。
 
-7. **线程中断规则**：
-   - 对线程 `interrupt()` 的调用 happens-before 被中断线程检测到中断事件
+```java
+class ThreadStartExample {
+    private int value = 0;
 
-8. **对象终结规则**：
-   - 对象的构造函数结束 happens-before 该对象的 `finalize()` 方法开始
+    void startThread() {
+        value = 42;               // 1
 
-### 总结
+        Thread thread = new Thread(() -> {
+            int x = value;        // 2: 一定能看到 value = 42
+        });
 
-happens-before 规则是 Java 内存模型提供的**可见性保证机制**：
-- volatile 通过 happens-before 规则保证可见性和有序性
-- synchronized 通过 happens-before 规则保证可见性、有序性和原子性
-- 理解 happens-before 是理解 Java 并发编程的关键
+        thread.start();           // start() 之前的操作对新线程可见
+    }
+}
+```
+
+**应用场景**：主线程初始化数据后启动工作线程。
+
+#### 6. join 规则（Thread Join Rule）
+
+**规则**：线程中的所有操作 happens-before 其他线程从 `Thread.join()` 返回。
+
+```java
+class ThreadJoinExample {
+    private int result = 0;
+
+    void compute() throws InterruptedException {
+        Thread thread = new Thread(() -> {
+            result = 42;          // 1: 子线程中的操作
+        });
+
+        thread.start();
+        thread.join();            // 等待子线程结束
+
+        int value = result;       // 2: 一定能看到 result = 42
+    }
+}
+```
+
+**应用场景**：等待子线程计算完成后获取结果。
+
+#### 7. interrupt 规则（Thread Interruption Rule）
+
+**规则**：对线程 `interrupt()` 的调用 happens-before 被中断线程检测到中断事件。
+
+```java
+class InterruptExample {
+    volatile boolean running = true;
+
+    void worker() {
+        Thread worker = new Thread(() -> {
+            while (running && !Thread.currentThread().isInterrupted()) {
+                // 执行任务
+            }
+        });
+
+        worker.start();
+
+        // 主线程
+        worker.interrupt();       // 1: 中断操作
+        // 工作线程会检测到中断  // 2: 一定能看到中断标志
+    }
+}
+```
+
+**应用场景**：优雅地停止线程。
+
+#### 8. finalize 规则（Finalizer Rule）
+
+**规则**：对象的构造函数结束 happens-before 该对象的 `finalize()` 方法开始。
+
+```java
+class FinalizeExample {
+    private int value;
+
+    public FinalizeExample() {
+        value = 42;               // 1: 构造函数
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        int x = value;            // 2: 一定能看到 value = 42
+        super.finalize();
+    }
+}
+```
+
+**注意**：`finalize()` 已被废弃，不推荐使用。
+
+## 习题
+
+- [balking模式](https://www.bilibili.com/video/BV16J411h7Rd?p=153)
+- [线程安全单例1](https://www.bilibili.com/video/BV16J411h7Rd?p=154)
+- [线程安全单例2~4](https://www.bilibili.com/video/BV16J411h7Rd?p=155)
+- [线程安全单例5](https://www.bilibili.com/video/BV16J411h7Rd?p=156)
