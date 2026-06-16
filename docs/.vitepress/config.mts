@@ -107,6 +107,7 @@ export default defineConfig({
               items: [
                 { text: '5.1. CAS', link: '/java/juc/shared-memory-model-lock-free/cas' },
                 { text: '5.2. 原子整数', link: '/java/juc/shared-memory-model-lock-free/atomic-integer' },
+                { text: '5.3. 原子引用', link: '/java/juc/shared-memory-model-lock-free/atomic-reference' },
               ]
             },
           ]
