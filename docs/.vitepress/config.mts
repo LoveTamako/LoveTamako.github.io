@@ -101,6 +101,14 @@ export default defineConfig({
                 { text: '4.5. volatile 原理', link: '/java/juc/shared-memory-model/volatile-internals' },
               ]
             },
+            {
+              text: '5. 共享模型之无锁',
+              collapsed: true,
+              items: [
+                { text: '5.1. CAS', link: '/java/juc/shared-memory-model-lock-free/cas' },
+                { text: '5.2. 原子整数', link: '/java/juc/shared-memory-model-lock-free/atomic-integer' },
+              ]
+            },
           ]
         }
       ]
