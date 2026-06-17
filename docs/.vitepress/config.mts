@@ -108,6 +108,9 @@ export default defineConfig({
                 { text: '5.1. CAS', link: '/java/juc/shared-memory-model-lock-free/cas' },
                 { text: '5.2. 原子整数', link: '/java/juc/shared-memory-model-lock-free/atomic-integer' },
                 { text: '5.3. 原子引用', link: '/java/juc/shared-memory-model-lock-free/atomic-reference' },
+                { text: '5.4. 原子数组', link: '/java/juc/shared-memory-model-lock-free/atomic-array' },
+                { text: '5.5. 原子更新器', link: '/java/juc/shared-memory-model-lock-free/atomic-updater' },
+                { text: '5.6. 原子累加器', link: '/java/juc/shared-memory-model-lock-free/atomic-accumulator' },
               ]
             },
           ]
