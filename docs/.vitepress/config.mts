@@ -103,6 +103,7 @@ export default defineConfig({
             },
             {
               text: '5. 共享模型之无锁',
+              link: '/java/juc/shared-memory-model-lock-free/overview',
               collapsed: true,
               items: [
                 { text: '5.1. CAS', link: '/java/juc/shared-memory-model-lock-free/cas' },
@@ -111,6 +112,7 @@ export default defineConfig({
                 { text: '5.4. 原子数组', link: '/java/juc/shared-memory-model-lock-free/atomic-array' },
                 { text: '5.5. 原子更新器', link: '/java/juc/shared-memory-model-lock-free/atomic-updater' },
                 { text: '5.6. 原子累加器', link: '/java/juc/shared-memory-model-lock-free/atomic-accumulator' },
+                { text: '5.7. Unsafe', link: '/java/juc/shared-memory-model-lock-free/unsafe' },
               ]
             },
           ]
