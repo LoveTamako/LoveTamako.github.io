@@ -122,6 +122,7 @@ export default defineConfig({
               items: [
                 { text: '6.1. 不可变对象', link: '/java/juc/shared-memory-model-immutability/immutable-object' },
                 { text: '6.2. 享元模式', link: '/java/juc/shared-memory-model-immutability/flyweight-pattern' },
+                { text: '6.3. final原理', link: '/java/juc/shared-memory-model-immutability/final-principle' },
               ]
             },
           ]
