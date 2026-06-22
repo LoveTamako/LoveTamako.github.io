@@ -115,7 +115,7 @@ export default defineConfig({
                 { text: '5.7. Unsafe', link: '/java/juc/shared-memory-model-lock-free/unsafe' },
               ]
             },
-               {
+            {
               text: '6. 共享模型之不可变',
               link: '/java/juc/shared-memory-model-immutability/overview',
               collapsed: true,
@@ -123,6 +123,15 @@ export default defineConfig({
                 { text: '6.1. 不可变对象', link: '/java/juc/shared-memory-model-immutability/immutable-object' },
                 { text: '6.2. 享元模式', link: '/java/juc/shared-memory-model-immutability/flyweight-pattern' },
                 { text: '6.3. final原理', link: '/java/juc/shared-memory-model-immutability/final-principle' },
+              ]
+            },
+             {
+              text: '7. 共享模型之并发工具',
+             //  link: '/java/juc/concurrent-tools/overview',
+              collapsed: true,
+              items: [
+                { text: '7.1. 自定义线程池', link: '/java/juc/concurrent-tools/custom-thread-pool' },
+              
               ]
             },
           ]
