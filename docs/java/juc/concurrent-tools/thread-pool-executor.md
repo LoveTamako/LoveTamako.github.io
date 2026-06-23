@@ -651,6 +651,8 @@ if (pool.awaitTermination(1, TimeUnit.MINUTES)) {
 
 ### 最佳实践
 
+优雅关闭线程池的标准模式（来自 [Oracle 官方文档 - ExecutorService](https://docs.oracle.com/javase/8/docs/api/java/util/concurrent/ExecutorService.html) 和《Java 并发编程实战》）：
+
 ```java
 // 优雅关闭线程池的标准模式
 pool.shutdown();  // 不再接收新任务
@@ -670,5 +672,20 @@ try {
     pool.shutdownNow();
     Thread.currentThread().interrupt();
 }
-``` 
+```
+
+**执行流程**：
+
+1. **`shutdown()`** - 平滑关闭，已提交任务继续执行
+2. **`awaitTermination(60s)`** - 等待任务完成，超时则进入下一步
+3. **`shutdownNow()`** - 强制关闭，中断所有线程
+4. **再次 `awaitTermination(60s)`** - 等待线程响应中断
+5. **捕获 `InterruptedException`** - 立即强制关闭并恢复中断状态
+
+**设计理念**：
+
+- 先优雅后强制，给任务正常完成的机会
+- 超时保护，避免无限期等待
+- 中断传播，遵循 Java 中断处理规范
+
 
