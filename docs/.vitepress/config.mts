@@ -131,7 +131,8 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { text: '7.1. 自定义线程池', link: '/java/juc/concurrent-tools/custom-thread-pool' },
-              
+                { text: '7.1. ThreadPoolExecutor', link: '/java/juc/concurrent-tools/thread-pool-executor' },
+               
               ]
             },
           ]

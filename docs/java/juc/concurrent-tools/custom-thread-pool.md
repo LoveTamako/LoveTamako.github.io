@@ -866,7 +866,9 @@ public class TestThreadPool {
 | 线程池状态 | ❌ 无 | ✅ RUNNING/SHUTDOWN/STOP 等 |
 
 **我们的简化之处**：
-- 不区分核心线程和非核心线程
+- **不区分核心线程和非核心线程**
+  - 自定义线程池：所有工作线程都使用 `poll(timeout)`，空闲超时后都会被销毁
+  - JDK ThreadPoolExecutor：核心线程默认使用 `take()` 永不超时，非核心线程使用 `poll(keepAliveTime)` 会超时退出（除非调用 `allowCoreThreadTimeOut(true)`）
 - 没有实现线程池状态管理（shutdown、shutdownNow 等）
 - 没有提供 Future 机制获取任务结果
 
