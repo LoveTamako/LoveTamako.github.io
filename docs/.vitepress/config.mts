@@ -133,7 +133,7 @@ export default defineConfig({
                 { text: '7.1. 自定义线程池', link: '/java/juc/concurrent-tools/custom-thread-pool' },
                 { text: '7.2. ThreadPoolExecutor', link: '/java/juc/concurrent-tools/thread-pool-executor' },
                 { text: '7.3. 任务调度线程池', link: '/java/juc/concurrent-tools/scheduled-thread-pool' },
-
+                { text: '7.4. ForkJoinPool 线程池', link: '/java/juc/concurrent-tools/fork-join' },
               ]
             },
           ]
