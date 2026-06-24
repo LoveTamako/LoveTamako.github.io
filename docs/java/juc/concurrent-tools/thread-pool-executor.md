@@ -1092,3 +1092,264 @@ long cpuTime = System.nanoTime() - start;
 :::
 
 ## Tomcat 线程池
+
+Tomcat 作为 Java Web 应用服务器，对标准 ThreadPoolExecutor 进行了扩展和定制，以更好地适应 HTTP 请求处理的特点。
+
+![alt text](image-1.png)
+
+### 设计目标
+
+标准 ThreadPoolExecutor 的工作流程不适合 Web 服务器场景：
+
+**标准线程池的问题**：
+
+```text
+请求到达 → 线程数 < corePoolSize?
+           ├─ 是 → 创建线程处理
+           └─ 否 → 加入队列
+                   ↓
+                 队列满?
+                   ├─ 否 → 等待（可能很久）
+                   └─ 是 → 创建救急线程
+```
+
+**问题场景**：
+
+```java
+// 假设配置：核心线程 10，最大线程 200，队列容量 1000
+ThreadPoolExecutor executor = new ThreadPoolExecutor(
+    10, 200,
+    60L, TimeUnit.SECONDS,
+    new LinkedBlockingQueue<>(1000)
+);
+
+// 场景：突发 500 个请求
+// 结果：
+// - 前 10 个请求：立即处理（创建核心线程）
+// - 第 11-1010 个请求：进入队列等待（最多等待很久）
+// - 第 1011-1200 个请求：创建救急线程处理
+// - 第 1201+ 个请求：拒绝
+
+// 问题：有 190 个救急线程空闲，却让请求在队列中等待
+```
+
+**Tomcat 的改进思路**：
+
+在队列满之前，优先创建线程到 maximumPoolSize，充分利用线程资源，提高吞吐量。
+
+```text
+请求到达 → 线程数 < corePoolSize?
+           ├─ 是 → 创建线程处理
+           └─ 否 → 线程数 < maximumPoolSize?
+                   ├─ 是 → 创建线程处理（优先）
+                   └─ 否 → 加入队列
+                           ↓
+                         队列满?
+                           ├─ 否 → 等待
+                           └─ 是 → 拒绝
+```
+
+### 核心实现
+
+Tomcat 通过自定义 `TaskQueue` 和 `ThreadPoolExecutor` 实现了上述逻辑。
+
+#### TaskQueue
+
+继承自 `LinkedBlockingQueue`，重写 `offer()` 方法改变入队逻辑。
+
+```java
+public class TaskQueue extends LinkedBlockingQueue<Runnable> {
+    private ThreadPoolExecutor parent = null;
+
+    @Override
+    public boolean offer(Runnable o) {
+        // 如果线程池为 null，使用默认行为
+        if (parent == null) return super.offer(o);
+
+        // 如果线程数已达到最大值，只能入队
+        if (parent.getPoolSize() == parent.getMaximumPoolSize()) {
+            return super.offer(o);
+        }
+
+        // 如果有空闲线程，入队让空闲线程处理
+        if (parent.getSubmittedCount() < parent.getPoolSize()) {
+            return super.offer(o);
+        }
+
+        // 如果线程数 < 最大线程数，返回 false 触发创建新线程
+        if (parent.getPoolSize() < parent.getMaximumPoolSize()) {
+            return false;
+        }
+
+        // 其他情况入队
+        return super.offer(o);
+    }
+}
+```
+
+**核心逻辑**：
+
+1. 如果线程数 < maximumPoolSize 且没有空闲线程，`offer()` 返回 `false`
+2. ThreadPoolExecutor 发现入队失败，会尝试创建新线程（addWorker）
+3. 实现了"优先创建线程，队列作为缓冲"的效果
+
+#### ThreadPoolExecutor 扩展
+
+Tomcat 的 `org.apache.tomcat.util.threads.ThreadPoolExecutor` 继承标准线程池并配合 TaskQueue 工作。
+
+```java
+public class ThreadPoolExecutor extends java.util.concurrent.ThreadPoolExecutor {
+    // 记录已提交但未完成的任务数
+    private final AtomicInteger submittedCount = new AtomicInteger(0);
+
+    @Override
+    public void execute(Runnable command) {
+        if (command == null) throw new NullPointerException();
+
+        // 提交任务时计数
+        submittedCount.incrementAndGet();
+        try {
+            super.execute(command);
+        } catch (RejectedExecutionException e) {
+            // 如果被拒绝，尝试再次入队
+            if (!((TaskQueue) getQueue()).force(command)) {
+                submittedCount.decrementAndGet();
+                throw new RejectedExecutionException("队列已满");
+            }
+        }
+    }
+
+    @Override
+    protected void afterExecute(Runnable r, Throwable t) {
+        // 任务完成后计数减 1
+        submittedCount.decrementAndGet();
+    }
+
+    public int getSubmittedCount() {
+        return submittedCount.get();
+    }
+}
+```
+
+### 配置方式
+
+在 Tomcat 的 `server.xml` 中配置线程池：
+
+```xml
+<Executor
+    name="tomcatThreadPool"
+    namePrefix="catalina-exec-"
+    maxThreads="200"           <!-- 最大线程数 -->
+    minSpareThreads="10"       <!-- 最小空闲线程数（核心线程数）-->
+    maxIdleTime="60000"        <!-- 线程空闲时间，单位毫秒 -->
+    maxQueueSize="100"         <!-- 最大队列长度 -->
+    prestartminSpareThreads="false"  <!-- 是否启动时创建核心线程 -->
+/>
+
+<Connector
+    executor="tomcatThreadPool"
+    port="8080"
+    protocol="HTTP/1.1"
+    connectionTimeout="20000"
+/>
+```
+
+**参数说明**：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `maxThreads` | 最大线程数 | 200 |
+| `minSpareThreads` | 核心线程数（最小空闲线程） | 25 |
+| `maxIdleTime` | 线程最大空闲时间（毫秒） | 60000 |
+| `maxQueueSize` | 任务队列最大长度 | Integer.MAX_VALUE |
+| `prestartminSpareThreads` | 启动时是否创建核心线程 | false |
+
+### 工作流程对比
+
+| 场景 | 标准 ThreadPoolExecutor | Tomcat ThreadPoolExecutor |
+|------|------------------------|--------------------------|
+| **10个核心线程，200最大线程** | | |
+| 第 1-10 个请求 | 创建线程处理 | 创建线程处理 |
+| 第 11 个请求 | 进入队列等待 | 创建新线程处理（优先） |
+| 第 12-200 个请求 | 进入队列等待 | 继续创建线程处理 |
+| 第 201 个请求 | 进入队列 | 进入队列 |
+| 队列满后 | 拒绝执行 | 拒绝执行 |
+
+**性能提升**：
+
+```java
+// 场景：突发 100 个请求，每个耗时 1 秒
+// 配置：核心 10，最大 200
+
+// 标准线程池：
+// - 前 10 个：立即处理，1 秒后完成
+// - 后 90 个：进入队列，10 个线程依次处理，需要 9 秒
+// 总耗时：约 10 秒
+
+// Tomcat 线程池：
+// - 创建 100 个线程并发处理
+// 总耗时：约 1 秒
+
+// 吞吐量提升：10 倍
+```
+
+### 最佳实践
+
+**1. 合理设置 maxThreads**
+
+```java
+// 根据业务特点设置
+maxThreads = CPU核数 × (1 + 平均等待时间/平均计算时间)
+
+// 示例：4核CPU，请求平均耗时100ms，其中20ms计算，80ms等待
+maxThreads = 4 × (1 + 80/20) = 20
+```
+
+**2. 控制队列长度**
+
+```xml
+<!-- 推荐设置有界队列，避免内存溢出 -->
+<Executor
+    maxQueueSize="1000"
+    <!-- 队列满时快速失败，而不是无限堆积 -->
+/>
+```
+
+**3. 监控线程池状态**
+
+```java
+ThreadPoolExecutor executor =
+    (ThreadPoolExecutor) connector.getProtocolHandler().getExecutor();
+
+// 监控指标
+int activeCount = executor.getActiveCount();        // 活跃线程数
+int poolSize = executor.getPoolSize();             // 当前线程数
+int queueSize = executor.getQueue().size();        // 队列大小
+int submittedCount = executor.getSubmittedCount(); // 已提交任务数
+
+// 告警条件
+if (activeCount > poolSize * 0.8) {
+    // 线程池使用率超过 80%，考虑扩容
+}
+```
+
+**4. 预启动核心线程**
+
+```xml
+<!-- 启动时创建核心线程，避免首次请求延迟 -->
+<Executor prestartminSpareThreads="true" />
+```
+
+::: tip Tomcat 线程池的优势
+- **快速响应**：优先创建线程而非排队，降低请求延迟
+- **资源利用**：充分利用线程资源处理突发流量
+- **平滑降级**：流量高峰过后自动回收空闲线程
+
+适用于对响应时间敏感的 Web 应用场景。
+:::
+
+::: warning 注意事项
+1. **线程数不是越多越好**：过多线程导致上下文切换开销，反而降低性能
+2. **需要监控内存**：每个线程占用约 1MB 栈空间，200 个线程约占 200MB
+3. **配合连接数调优**：`maxConnections` 应大于 `maxThreads`，避免连接被拒绝
+:::
