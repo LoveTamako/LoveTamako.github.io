@@ -125,14 +125,15 @@ export default defineConfig({
                 { text: '6.3. final原理', link: '/java/juc/shared-memory-model-immutability/final-principle' },
               ]
             },
-             {
+            {
               text: '7. 共享模型之并发工具',
-             //  link: '/java/juc/concurrent-tools/overview',
+              //  link: '/java/juc/concurrent-tools/overview',
               collapsed: true,
               items: [
                 { text: '7.1. 自定义线程池', link: '/java/juc/concurrent-tools/custom-thread-pool' },
-                { text: '7.1. ThreadPoolExecutor', link: '/java/juc/concurrent-tools/thread-pool-executor' },
-               
+                { text: '7.2. ThreadPoolExecutor', link: '/java/juc/concurrent-tools/thread-pool-executor' },
+                { text: '7.3. 任务调度线程池', link: '/java/juc/concurrent-tools/scheduled-thread-pool' },
+
               ]
             },
           ]
