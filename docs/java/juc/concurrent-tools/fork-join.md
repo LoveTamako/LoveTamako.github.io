@@ -45,14 +45,16 @@ ForkJoinPool 使用工作窃取（Work-Stealing）算法优化任务调度。
 **核心机制**：
 
 ```text
-线程1: [任务1][任务2][任务3][任务4]  ← 队列尾部添加
-        ↑ 从头部取任务               ↓ 线程1执行任务
+线程1: [任务1][任务2][任务3][任务4]  ← 新任务从队列尾部添加
+                                   ↑
+                             线程1从尾部执行（LIFO）
 
-线程2: [任务5][任务6]  ← 队列为空
-        ↑ 从其他线程队列尾部窃取
-        └──────────┐
-                   ↓
-线程1: [任务1][任务2][任务3]     ← 线程2窃取了任务4
+线程2: 队列为空
+        ↓
+从线程1队列头部窃取任务（FIFO）
+
+线程1: [任务2][任务3][任务4]
+线程2: [任务1]
 ```
 
 **优势**：
@@ -63,9 +65,9 @@ ForkJoinPool 使用工作窃取（Work-Stealing）算法优化任务调度。
 
 **实现细节**：
 
-- 工作线程从队列**头部**取任务（LIFO，利用缓存局部性）
-- 窃取线程从队列**尾部**取任务（FIFO，减少竞争）
-- 使用无锁算法（CAS）减少线程同步开销
+- 工作线程（Owner）从队列**尾部（Tail）**获取任务（**LIFO，后进先出**），优先执行最新创建的子任务，提高缓存局部性。
+- 窃取线程（Thief）从其他线程队列**头部（Head）**窃取任务（**FIFO，先进先出**），减少与拥有者线程竞争。
+- 使用 **CAS（Compare-And-Swap）** 等无锁算法减少线程同步开销，提高并发性能。
 
 ## 核心 API
 
@@ -92,6 +94,69 @@ public final V join();
 
 // 直接在当前线程同步执行
 public final V invoke();
+
+// 批量执行多个子任务
+public static void invokeAll(ForkJoinTask<?> t1, ForkJoinTask<?> t2);
+public static void invokeAll(ForkJoinTask<?>... tasks);
+public static <T extends ForkJoinTask<?>> Collection<T> invokeAll(Collection<T> tasks);
+```
+
+**方法详解**：
+
+| 方法 | 说明 | 使用场景 |
+|------|------|---------|
+| `fork()` | 异步执行任务，将任务放入当前线程的工作队列 | 需要精细控制任务执行顺序 |
+| `join()` | 等待任务完成并返回结果，会阻塞当前线程 | 获取已 fork 的任务结果 |
+| `invoke()` | 同步执行任务，直接在当前线程执行 | 单个任务直接执行 |
+| `invokeAll()` | 批量执行多个子任务，自动处理 fork 和 join | 多个子任务并行执行（推荐） |
+
+**invokeAll 详解**：
+
+`invokeAll()` 是 ForkJoinTask 提供的静态方法，用于批量执行多个子任务。
+
+**执行流程**：
+
+```text
+invokeAll(task1, task2, task3)
+    ↓
+1. fork task1, task2  // 异步执行 task1 和 task2
+2. invoke task3       // 在当前线程同步执行 task3（最后一个任务）
+3. join task1, task2  // 等待 task1 和 task2 完成
+    ↓
+所有任务完成
+```
+
+**优势**：
+
+1. **代码简洁**：一行代码替代多次 fork + join
+2. **自动优化**：最后一个任务在当前线程执行，避免不必要的 fork 开销
+3. **异常处理**：自动处理子任务异常并传播
+4. **适合批量操作**：多个子任务并行执行的首选方式
+
+**使用示例**：
+
+```java
+// 方式 1：传统 fork + join（繁琐）
+leftTask.fork();
+rightTask.fork();
+long leftResult = leftTask.join();
+long rightResult = rightTask.join();
+return leftResult + rightResult;
+
+// 方式 2：invokeAll（推荐）
+invokeAll(leftTask, rightTask);
+return leftTask.join() + rightTask.join();
+
+// 方式 3：多个任务
+invokeAll(task1, task2, task3, task4);
+// 等价于：
+// task1.fork();
+// task2.fork();
+// task3.fork();
+// task4.invoke();  // 最后一个任务在当前线程执行
+// task1.join();
+// task2.join();
+// task3.join();
 ```
 
 ### RecursiveTask
