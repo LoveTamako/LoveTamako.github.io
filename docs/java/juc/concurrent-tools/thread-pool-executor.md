@@ -2,7 +2,7 @@
 
 JDK 提供的标准线程池实现，是 Java 并发编程中最重要的工具之一。通过深入理解其核心参数、工作原理和使用场景，可以有效管理线程资源，提升系统性能。
 
-![alt text](image.png)
+![ThreadPoolExecutor 架构图](concurrent-tools.assets/threadpoolexecutor-architecture.png)
 
 ## 线程池状态
 
@@ -1095,7 +1095,7 @@ long cpuTime = System.nanoTime() - start;
 
 Tomcat 作为 Java Web 应用服务器，对标准 ThreadPoolExecutor 进行了扩展和定制，以更好地适应 HTTP 请求处理的特点。
 
-![alt text](image-1.png)
+![Tomcat 线程池架构图](concurrent-tools.assets/tomcat-thread-pool.png)
 
 ### 设计目标
 
