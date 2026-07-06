@@ -61,11 +61,15 @@ final void lock() {
 ```java
 // AbstractQueuedSynchronizer
 public final void acquire(int arg) {
-    // 1. 尝试获取锁
+    // 1. 首先尝试获取锁，避免无竞争时进入等待队列；
+    //    如果获取失败，不立即阻塞，而是先进入 AQS 队列，后续还会再次尝试获取锁，
+    //    因为从本次获取失败到进入阻塞之间，锁可能已经被其他线程释放
     if (!tryAcquire(arg) &&
-        // 2. 获取失败，将线程加入等待队列并阻塞
+        // 2. 获取失败则加入 CLH 等待队列，在队列中循环竞争锁：
+        //    前驱为 head 时再次尝试获取锁；获取失败才 park 挂起；
+        //    被唤醒后继续循环竞争，直到成功获取锁
         acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
-        // 3. 处理中断
+        // 3. 若等待期间被中断，则在获取锁后恢复中断标志
         selfInterrupt();
 }
 ```
@@ -296,4 +300,264 @@ private final boolean parkAndCheckInterrupt() {
 }
 ```
 
+### 基本解锁流程
 
+当线程调用 `unlock()` 方法释放锁时,会触发 AQS 的释放流程。如果释放后有等待线程,则会唤醒队列中的下一个线程。
+
+**核心源码**:
+
+```java
+// ReentrantLock
+public void unlock() {
+    sync.release(1);
+}
+
+// AbstractQueuedSynchronizer
+public final boolean release(int arg) {
+    // 1. 尝试释放锁
+    if (tryRelease(arg)) {
+        Node h = head;
+        // 2. 如果队列不为空且头节点状态不为 0,唤醒后继节点
+        if (h != null && h.waitStatus != 0)
+            unparkSuccessor(h);
+        return true;
+    }
+    return false;
+}
+```
+
+**tryRelease 释放锁**:
+
+```java
+// ReentrantLock.Sync
+protected final boolean tryRelease(int releases) {
+    // 1. 计算释放后的 state 值
+    int c = getState() - releases;
+
+    // 2. 检查当前线程是否持有锁
+    if (Thread.currentThread() != getExclusiveOwnerThread())
+        throw new IllegalMonitorStateException();
+
+    boolean free = false;
+    // 3. 判断是否完全释放(处理重入情况)
+    if (c == 0) {
+        free = true;
+        setExclusiveOwnerThread(null);  // 清除持有者
+    }
+    setState(c);  // 更新 state
+    return free;  // 返回是否完全释放
+}
+```
+
+**重入锁的释放**:
+- 如果锁被重入了 n 次,需要调用 n 次 `unlock()` 才能完全释放
+- 每次 `unlock()` 将 state 减 1
+- 只有当 state 减到 0 时,`tryRelease()` 才返回 `true`
+
+**unparkSuccessor 唤醒后继节点**:
+
+```java
+// AbstractQueuedSynchronizer
+private void unparkSuccessor(Node node) {
+    int ws = node.waitStatus;
+    // 1. 清除头节点的状态
+    if (ws < 0)
+        compareAndSetWaitStatus(node, ws, 0);
+
+    // 2. 找到下一个需要唤醒的节点
+    Node s = node.next;
+    // 如果后继节点为空或已取消,从队尾向前找第一个有效节点
+    if (s == null || s.waitStatus > 0) {
+        s = null;
+        for (Node t = tail; t != null && t != node; t = t.prev)
+            if (t.waitStatus <= 0)
+                s = t;
+    }
+    // 3. 唤醒找到的节点
+    if (s != null)
+        LockSupport.unpark(s.thread);
+}
+```
+
+**为什么从尾部向前遍历**:
+- `node.next` 可能为 null 或指向已取消的节点
+- 在 `addWaiter()` 中,节点入队时先设置 `prev`,后设置 `next`
+- 从 tail 向前遍历能保证找到所有已入队的有效节点
+
+### 解锁竞争成功流程
+
+当持有锁的线程调用 `unlock()` 释放锁后,等待队列中的线程被唤醒并成功获取锁。
+
+**完整流程**:
+
+1. **Thread-1 释放锁**:
+   ```java
+   // Thread-1 调用 unlock()
+   unlock()
+     → release(1)
+     → tryRelease(1)  // state 从 1 变为 0,返回 true
+     → unparkSuccessor(head)  // 唤醒 head.next 节点
+   ```
+
+2. **Thread-2 被唤醒**:
+   ```java
+   // Thread-2 在 acquireQueued() 的循环中被唤醒
+   LockSupport.park(this);  // 阻塞在这里
+   // ↓ 被 unpark() 唤醒
+   return Thread.interrupted();  // 检查中断状态
+   ```
+
+3. **Thread-2 尝试获取锁**:
+   ```java
+   for (;;) {
+       final Node p = node.predecessor();
+       // Thread-2 的前驱是 head,尝试获取锁
+       if (p == head && tryAcquire(arg)) {
+           // 获取成功!
+           setHead(node);  // Thread-2 成为新的 head
+           p.next = null;  // 断开旧 head
+           return false;   // 返回未中断
+       }
+       // ...
+   }
+   ```
+
+**状态变化图**:
+
+```text
+释放前:
+head(Thread-1)          tail
+    ↓                    ↓
+[Thread-1] ← → [Thread-2] ← → [Thread-3]
+  持有锁        等待          等待
+
+    ↓ Thread-1 调用 unlock(),唤醒 Thread-2
+
+Thread-2 被唤醒并获取锁:
+head(Thread-2)          tail
+    ↓                    ↓
+[Thread-2] ← → [Thread-3]
+  持有锁        等待
+```
+
+**关键点**:
+- 等待线程被唤醒后,继续在 `acquireQueued()` 的循环中执行
+- 前驱节点是 head,满足获取锁的条件
+- 通过 `tryAcquire()` 成功获取锁(此时 state = 0)
+- 将自己设置为新的 head,完成锁的传递
+
+### 解锁竞争失败流程
+
+这是**非公平锁**的典型场景:当持有锁的线程释放锁并唤醒等待线程时,一个新来的线程可能会"插队"抢先获取锁。
+
+**场景描述**:
+
+```text
+初始状态:
+head(Thread-1)          tail
+    ↓                    ↓
+[Thread-1] ← → [Thread-2]
+  持有锁        等待
+
+Thread-1 释放锁,同时 Thread-3 新到达:
+- Thread-1 调用 unlock(),唤醒 Thread-2
+- Thread-3 调用 lock(),直接尝试 CAS 获取锁
+```
+
+**竞争时间线**:
+
+| 时间点 | Thread-1(持有锁) | Thread-2(等待中) | Thread-3(新到达) |
+|--------|-----------------|------------------|------------------|
+| T1 | 调用 `unlock()` | 阻塞在 `park()` | - |
+| T2 | 执行 `tryRelease()`,state = 0 | 阻塞在 `park()` | - |
+| T3 | 执行 `unparkSuccessor()` | 阻塞在 `park()` | 调用 `lock()` |
+| T4 | - | 被唤醒,准备 CAS | 执行 CAS 抢锁 |
+| T5 | - | CAS 失败 ❌ | **CAS 成功** ✅ |
+
+**详细流程分析**:
+
+1. **Thread-3 的加锁流程** (非公平锁的插队机制):
+   ```java
+   // Thread-3 调用 lock()
+   final void lock() {
+       // 直接尝试 CAS,不检查等待队列
+       if (compareAndSetState(0, 1))
+           setExclusiveOwnerThread(Thread.currentThread());
+       // ...
+   }
+   ```
+
+2. **Thread-2 的唤醒流程**:
+   ```java
+   // Thread-2 被 unpark() 唤醒后继续执行
+   for (;;) {
+       final Node p = node.predecessor();
+       if (p == head && tryAcquire(arg)) {  // 尝试获取锁
+           // 但此时 state 已被 Thread-3 改为 1
+           // tryAcquire() 返回 false
+       }
+       // 再次进入阻塞逻辑
+       if (shouldParkAfterFailedAcquire(p, node) &&
+           parkAndCheckInterrupt())
+           interrupted = true;
+   }
+   ```
+
+**状态变化过程**:
+
+```text
+1. Thread-1 释放锁,Thread-2 在队列中等待:
+head                    tail
+  ↓                      ↓
+[哨兵] ← → [Thread-2]
+          等待(即将被唤醒)
+
+2. Thread-3 新到达,直接 CAS 抢锁(不入队):
+Thread-3.lock() → CAS(0→1) 成功!
+
+3. Thread-2 被唤醒但获取锁失败,继续等待:
+head                    tail
+  ↓                      ↓
+[哨兵] ← → [Thread-2]
+          等待(继续阻塞)
+
+Thread-3 持有锁(未在队列中)
+```
+
+::: tip 为什么 Thread-3 不在队列中?
+
+非公平锁的核心机制:
+- **新线程直接竞争**:Thread-3 调用 `lock()` 时,首先尝试 CAS 获取锁
+- **成功则不入队**:如果 CAS 成功,直接持有锁,无需进入等待队列
+- **失败才入队**:只有 CAS 失败时,才会通过 `acquire()` 进入队列等待
+
+这与队列中的线程不同:
+- **队列线程**:已经尝试过获取锁但失败,在队列中等待被唤醒
+- **新到达线程**:直接参与竞争,有机会"插队"获取锁
+
+:::
+
+**非公平锁的关键特性**:
+
+1. **新线程可以插队**:
+   - Thread-3 调用 `lock()` 时,直接执行 CAS,不检查等待队列
+   - 如果此时锁刚好被释放(state = 0),Thread-3 可以立即获取锁
+   - Thread-2 虽然被唤醒,但仍需要竞争,可能再次失败
+
+2. **为什么允许插队**:
+   - **减少线程唤醒开销**:线程从阻塞到就绪需要时间,新线程可以直接运行
+   - **提高吞吐量**:避免 CPU 空闲等待线程唤醒
+   - **适用于锁持有时间短的场景**:如果临界区很短,插队影响较小
+
+3. **代价**:
+   - **可能导致线程饥饿**:等待线程可能长时间获取不到锁
+   - **不保证公平性**:先到达的线程不一定先获取锁
+
+4. **Thread-2 的后续行为**:
+   - 竞争失败后,继续在 `acquireQueued()` 循环中等待
+   - 重新进入 `park()` 阻塞状态
+   - 等待 Thread-3 释放锁后再次被唤醒
+   - 下次唤醒时,仍可能被其他新线程插队
+
+
+## 非公平锁
