@@ -970,6 +970,371 @@ if (c == 0) {
 
 ## 条件变量实现原理
 
+每个条件变量对应着一个等待队列，其实现类是 `ConditionObject`。条件变量允许线程在持有锁的情况下等待某个条件满足，与 `Object.wait()` / `notify()` 类似，但功能更强大。
+
+### 条件队列与同步队列
+
+条件变量的实现涉及两种队列的协作：
+
+1. **同步队列（Sync Queue）**：
+   - **由 AQS 维护**，用于等待获取锁的线程
+   - 通过 `head` 和 `tail` 指针管理
+   - 使用 `prev` 和 `next` 构成双向链表
+
+2. **条件队列（Condition Queue）**：
+   - **由 ConditionObject 维护**，用于等待条件满足的线程
+   - 通过 `firstWaiter` 和 `lastWaiter` 指针管理
+   - 使用 `nextWaiter` 构成单向链表
+
+```java
+// AbstractQueuedSynchronizer.ConditionObject
+public class ConditionObject implements Condition {
+    // 条件队列的头节点
+    private transient Node firstWaiter;
+    // 条件队列的尾节点
+    private transient Node lastWaiter;
+
+    // ...
+}
+```
+
+**队列结构示意**：
+
+```text
+同步队列（等待锁）：
+head                              tail
+  ↓                                ↓
+[Thread-1] ←→ [Thread-2] ←→ [Thread-3]
+
+条件队列（等待条件）：
+firstWaiter                   lastWaiter
+     ↓                            ↓
+[Thread-4] → [Thread-5] → [Thread-6]
+```
+
 ### await()
 
+`await()` 方法使当前线程在条件上等待，直到被 `signal()` 唤醒或被中断。调用 `await()` 时，线程必须已经持有锁。
+
+#### 核心流程
+
+```java
+// AbstractQueuedSynchronizer.ConditionObject
+public final void await() throws InterruptedException {
+    // 1. 响应中断
+    if (Thread.interrupted())
+        throw new InterruptedException();
+
+    // 2. 将当前线程加入条件队列
+    Node node = addConditionWaiter();
+
+    // 3. 完全释放锁（处理重入情况）
+    int savedState = fullyRelease(node);
+
+    // 4. 阻塞等待，直到被转移到同步队列
+    int interruptMode = 0;
+    while (!isOnSyncQueue(node)) {
+        LockSupport.park(this);
+        if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+            break;
+    }
+
+    // 5. 重新获取锁
+    if (acquireQueued(node, savedState) && interruptMode != THROW_IE)
+        interruptMode = REINTERRUPT;
+
+    // 6. 清理条件队列中已取消的节点
+    if (node.nextWaiter != null)
+        unlinkCancelledWaiters();
+
+    // 7. 处理中断
+    if (interruptMode != 0)
+        reportInterruptAfterWait(interruptMode);
+}
+```
+
+#### 详细步骤分析
+
+**1. addConditionWaiter 加入条件队列**：
+
+```java
+private Node addConditionWaiter() {
+    Node t = lastWaiter;
+
+    // 清理已取消的节点
+    if (t != null && t.waitStatus != Node.CONDITION) {
+        unlinkCancelledWaiters();
+        t = lastWaiter;
+    }
+
+    // 创建新节点，状态为 CONDITION
+    Node node = new Node(Thread.currentThread(), Node.CONDITION);
+
+    // 插入到条件队列尾部
+    if (t == null)
+        firstWaiter = node;
+    else
+        t.nextWaiter = node;
+    lastWaiter = node;
+    return node;
+}
+```
+
+**关键点**：
+- 节点的 `waitStatus` 设置为 `Node.CONDITION`（-2）
+- 条件队列是单向链表，通过 `nextWaiter` 连接
+- 不需要 CAS 操作，因为调用线程已持有锁
+
+**2. fullyRelease 完全释放锁**：
+
+```java
+final int fullyRelease(Node node) {
+    boolean failed = true;
+    try {
+        // 获取当前 state 值（可能重入了多次）
+        int savedState = getState();
+        // 一次性释放所有重入次数
+        if (release(savedState)) {
+            failed = false;
+            return savedState;  // 返回释放前的 state
+        } else {
+            throw new IllegalMonitorStateException();
+        }
+    } finally {
+        if (failed)
+            node.waitStatus = Node.CANCELLED;
+    }
+}
+```
+
+**为什么要完全释放**：
+- 如果锁被重入了多次（state > 1），必须一次性全部释放
+- 否则其他线程无法获取锁，可能导致死锁
+- 保存 `savedState`，等被唤醒后恢复相同的重入次数
+
+**3. isOnSyncQueue 检查是否在同步队列**：
+
+```java
+final boolean isOnSyncQueue(Node node) {
+    // 如果状态是 CONDITION 或没有前驱节点，说明还在条件队列
+    if (node.waitStatus == Node.CONDITION || node.prev == null)
+        return false;
+    // 如果有后继节点，说明在同步队列中
+    if (node.next != null)
+        return true;
+    // 从同步队列尾部向前查找
+    return findNodeFromTail(node);
+}
+```
+
+**4. 循环阻塞等待**：
+
+```java
+while (!isOnSyncQueue(node)) {
+    LockSupport.park(this);  // 阻塞当前线程
+    // 被唤醒后检查中断
+    if ((interruptMode = checkInterruptWhileWaiting(node)) != 0)
+        break;
+}
+```
+
+**唤醒时机**：
+- 其他线程调用 `signal()` 或 `signalAll()`
+- 线程被中断
+- 虚假唤醒（spurious wakeup）
+
+#### 完整流程示例
+
+**场景**：Thread-1 持有锁并调用 `condition.await()`，Thread-2 在同步队列中等待获取锁
+
+```text
+初始状态：
+Thread-1 持有锁
+同步队列：
+head → [哨兵] ←→ [Thread-2]  // Thread-2 等待获取锁
+
+条件队列：
+(空)
+
+    ↓ Thread-1 调用 condition.await()
+
+步骤1：Thread-1 加入条件队列
+同步队列：
+head → [哨兵] ←→ [Thread-2]  // Thread-2 仍在等待
+
+条件队列：
+firstWaiter → [Thread-1(CONDITION)]
+
+步骤2：Thread-1 释放锁（fullyRelease），唤醒 Thread-2
+同步队列：
+head → [哨兵] ←→ [Thread-2]  // Thread-2 被 unpark 唤醒
+
+条件队列：
+firstWaiter → [Thread-1(CONDITION)]  // Thread-1 在 park() 中阻塞
+
+步骤3：Thread-2 获取锁成功
+Thread-2 持有锁
+同步队列：
+head → [Thread-2]
+
+条件队列：
+firstWaiter → [Thread-1(CONDITION)]  // Thread-1 继续等待 signal()
+
+此时：
+- Thread-1 在条件队列中等待，不持有锁
+- Thread-2 持有锁，继续执行
+- Thread-1 等待 signal() 唤醒
+```
+
 ### signal()
+
+`signal()` 方法唤醒在条件队列中等待时间最长的线程（即 `firstWaiter`）。调用 `signal()` 时，当前线程必须持有锁。
+
+#### 核心流程
+
+```java
+// AbstractQueuedSynchronizer.ConditionObject
+public final void signal() {
+    // 1. 检查当前线程是否持有锁
+    if (!isHeldExclusively())
+        throw new IllegalMonitorStateException();
+
+    // 2. 唤醒条件队列的第一个节点
+    Node first = firstWaiter;
+    if (first != null)
+        doSignal(first);
+}
+```
+
+**关键点**：
+- 必须持有锁才能调用 `signal()`
+- 只唤醒条件队列的第一个节点（FIFO）
+- 如果条件队列为空，`signal()` 不做任何操作
+
+#### doSignal 转移节点
+
+```java
+private void doSignal(Node first) {
+    do {
+        // 1. 将 firstWaiter 指向下一个节点
+        if ((firstWaiter = first.nextWaiter) == null)
+            lastWaiter = null;
+        // 2. 断开当前节点与条件队列的连接
+        first.nextWaiter = null;
+
+        // 3. 尝试将节点转移到同步队列
+    } while (!transferForSignal(first) &&
+             (first = firstWaiter) != null);
+}
+```
+
+**transferForSignal 转移到同步队列**：
+
+```java
+final boolean transferForSignal(Node node) {
+    // 1. 尝试将节点状态从 CONDITION 改为 0
+    if (!compareAndSetWaitStatus(node, Node.CONDITION, 0))
+        return false;  // 失败说明节点已被取消
+
+    // 2. 将节点加入同步队列（enq 返回前驱节点）
+    Node p = enq(node);
+    int ws = p.waitStatus;
+
+    // 3. 如果前驱节点已取消或设置 SIGNAL 失败，直接唤醒当前线程
+    if (ws > 0 || !compareAndSetWaitStatus(p, ws, Node.SIGNAL))
+        LockSupport.unpark(node.thread);
+
+    return true;
+}
+```
+
+**流程分析**：
+
+1. **CAS 修改状态**：将节点的 `waitStatus` 从 `CONDITION` 改为 0
+   - 成功：节点有效，继续转移
+   - 失败：节点已被取消（如被中断），跳过该节点
+
+2. **加入同步队列**：通过 `enq(node)` 将节点插入到同步队列尾部
+
+3. **设置前驱状态**：将前驱节点的 `waitStatus` 设为 `SIGNAL`
+   - 目的：确保前驱释放锁时会唤醒当前节点
+   - 如果设置失败或前驱已取消，立即唤醒当前线程
+
+#### 完整流程示例
+
+**场景**：Thread-2 持有锁，Thread-1 在条件队列中等待，Thread-2 调用 `signal()`
+
+```text
+初始状态：
+同步队列：
+head → [Thread-2(持有锁)]
+
+条件队列：
+firstWaiter → [Thread-1(CONDITION)]
+
+    ↓ Thread-2 调用 condition.signal()
+
+步骤1：doSignal 从条件队列移除 Thread-1
+条件队列：
+firstWaiter → null  // 队列变空
+
+步骤2：transferForSignal 将 Thread-1 转移到同步队列
+同步队列：
+head → [Thread-2(持有锁)] ←→ [Thread-1(等待)]
+
+步骤3：Thread-1 在 await() 中被唤醒
+- 检查 isOnSyncQueue(node) 返回 true
+- 退出 while 循环
+- 调用 acquireQueued() 竞争锁
+
+    ↓ Thread-2 调用 unlock()
+
+步骤4：Thread-1 获取锁并从 await() 返回
+同步队列：
+head → [Thread-1(持有锁)]
+
+Thread-1 继续执行临界区代码
+```
+
+#### signal() vs signalAll()
+
+| 特性 | signal() | signalAll() |
+|------|----------|-------------|
+| 唤醒数量 | 唤醒条件队列的第一个线程 | 唤醒条件队列的所有线程 |
+| 转移行为 | 只将一个节点转移到同步队列 | 将所有节点转移到同步队列 |
+| 性能开销 | 低（只操作一个节点） | 高（需要遍历所有节点） |
+| 使用场景 | 条件满足时只需一个线程处理 | 条件满足时所有线程都应重新竞争 |
+| 典型示例 | 生产者-消费者（单个消费者） | 广播通知（状态变更） |
+
+
+```java
+// signal(): 唤醒一个线程
+public final void signal() {
+    if (!isHeldExclusively())
+        throw new IllegalMonitorStateException();
+    Node first = firstWaiter;
+    if (first != null)
+        doSignal(first);  // 只唤醒第一个
+}
+
+// signalAll(): 唤醒所有线程
+public final void signalAll() {
+    if (!isHeldExclusively())
+        throw new IllegalMonitorStateException();
+    Node first = firstWaiter;
+    if (first != null)
+        doSignalAll(first);  // 唤醒所有
+}
+
+private void doSignalAll(Node first) {
+    // 清空条件队列
+    lastWaiter = firstWaiter = null;
+    do {
+        Node next = first.nextWaiter;
+        first.nextWaiter = null;
+        transferForSignal(first);  // 逐个转移到同步队列
+        first = next;
+    } while (first != null);
+}
+```
+
