@@ -136,6 +136,7 @@ export default defineConfig({
                 { text: '7.4. ForkJoinPool 线程池', link: '/java/juc/concurrent-tools/fork-join' },
                 { text: '7.5. AQS', link: '/java/juc/concurrent-tools/aqs' },
                 { text: '7.6. ReentrantLock 原理', link: '/java/juc/concurrent-tools/reentrant-lock' },
+                { text: '7.7. ReentrantReadWriteLock', link: '/java/juc/concurrent-tools/reentrant-read-write-lock' },
               ]
             },
           ]
