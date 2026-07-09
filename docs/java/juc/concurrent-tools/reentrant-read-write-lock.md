@@ -1,37 +1,28 @@
 # ReentrantReadWriteLock
 
-`ReentrantReadWriteLock` 是 `java.util.concurrent.locks` 包下的读写锁实现，基于 AQS 构建。它将锁分为**读锁**和**写锁**两种，允许多个读线程同时访问，但写线程访问时会排斥所有其他线程，适用于读多写少的场景。
+在传统的互斥锁（如 `ReentrantLock`、`synchronized`）中，无论是读操作还是写操作都需要独占锁，即使多个线程只是读取数据也必须串行执行。这在读多写少的场景下会导致不必要的性能损失。
 
-## 读写锁的设计思想
+`ReentrantReadWriteLock` 是 `java.util.concurrent.locks` 包下的读写锁实现，基于 AQS 构建。它将锁分为**读锁（Read Lock）**和**写锁（Write Lock）**两种：
 
-### 为什么需要读写锁
+- **读锁**：共享锁，允许多个线程同时持有
+- **写锁**：独占锁，同一时刻只能有一个线程持有，且会排斥所有读线程
 
-在传统的互斥锁（如 `ReentrantLock`、`synchronized`）中，无论是读操作还是写操作都需要独占锁，即使多个线程只是读取数据（不修改数据）也必须串行执行。这在读多写少的场景下会导致不必要的性能损失。
-
-**读写锁的核心思想**：
-- **读读共享**：多个读线程可以同时持有读锁，互不阻塞
-- **读写互斥**：读线程和写线程互斥，不能同时持有锁
-- **写写互斥**：写线程之间互斥，同一时刻只能有一个写线程持有锁
-
-### 锁兼容性矩阵
+锁的兼容性规则如下表所示：
 
 |  | 读锁 | 写锁 |
 |---|-----|-----|
 | **读锁** | ✅ 兼容 | ❌ 互斥 |
 | **写锁** | ❌ 互斥 | ❌ 互斥 |
 
-### 适用场景
+这种读写分离的设计使得读操作可以并发执行，在读多写少的场景下能显著提升性能。类似于数据库中的 `SELECT ... LOCK IN SHARE MODE`，允许多个事务同时读取但阻止写入。
 
-**适合使用读写锁的场景**：
-- 读操作远多于写操作（读多写少）
-- 读操作耗时较长
-- 数据一致性要求不允许脏读
+:::warning 注意事项
+- **条件变量限制**：只有写锁支持条件变量（Condition），读锁不支持
+- **锁升级限制**：不支持从读锁升级到写锁（会导致死锁）
+- **锁降级支持**：支持从写锁降级到读锁
+:::     
 
-**不适合使用读写锁的场景**：
-- 读写操作差不多或写多于读
-- 读操作非常快（锁竞争开销可能大于收益）
-
-### 基本使用示例
+## 基本使用示例
 
 ```java
 public class CachedData {
@@ -82,6 +73,239 @@ public class CachedData {
     }
 }
 ```
+
+## 应用 - 缓存
+
+:::tip 说明
+本节通过 SQL 查询缓存的案例演示 ReentrantReadWriteLock 的实际应用，重点展示如何使用读写锁保证缓存一致性。实际生产环境需要考虑更多因素（过期策略、内存管理、分布式一致性等）。
+:::
+
+### 场景：SQL 查询缓存
+
+实现一个根据 SQL 语句和参数缓存查询结果的系统：
+- **查询操作**（读多）：先查缓存，未命中则查数据库并缓存
+- **更新操作**（写少）：更新数据库后同步更新缓存
+
+**无锁实现**：
+
+```java
+public class SqlCache {
+    private final Map<String, Object> cache = new HashMap<>();
+
+    public Object query(String sql, Object... params) {
+        String key = buildKey(sql, params);
+        Object result = cache.get(key);
+        if (result == null) {
+            result = queryDatabase(sql, params);
+            cache.put(key, result);
+        }
+        return result;
+    }
+
+    public void update(String sql, Object... params) {
+        cache.clear();              // 先删除缓存
+        updateDatabase(sql, params); // 再更新数据库
+    }
+
+    private String buildKey(String sql, Object... params) {
+        return sql + ":" + Arrays.toString(params);
+    }
+
+    private Object queryDatabase(String sql, Object... params) {
+        return new Object(); // 模拟查询
+    }
+
+    private void updateDatabase(String sql, Object... params) {
+        // 模拟更新
+    }
+}
+```
+
+### 问题分析
+
+这个实现存在三个严重的并发问题：
+
+**问题一：HashMap 非线程安全**
+
+`HashMap` 在并发场景下存在严重问题：
+
+- **数据丢失**：两个线程同时 `put` 到同一个槽位时，后写入的可能覆盖先写入的
+- **结构破坏**：并发扩容时可能导致链表结构损坏（JDK 8 之前甚至会形成环形链表导致死循环）
+- **读取异常**：一个线程正在扩容时，其他线程读取可能得到 null 或不完整的数据
+
+即使使用 `ConcurrentHashMap` 解决了容器本身的线程安全问题，缓存的读取-判断-写入操作仍然不是原子的，会引发问题二和问题三。
+
+**问题二：缓存击穿**
+
+多个线程同时查询不存在的缓存时，都会去查询数据库：
+
+```text
+T1: 读缓存(null) → 查询数据库 → 写入缓存
+T2: 读缓存(null) → 查询数据库 → 写入缓存
+T3: 读缓存(null) → 查询数据库 → 写入缓存
+```
+
+**为什么会这样**：代码中的 `if (result == null)` 检查和数据库查询之间没有加锁，多个线程可能同时通过检查。假设查询数据库需要 100ms，在这期间到达的所有请求都会发现缓存为空，继续查询数据库。
+
+**影响**：大量请求同时打到数据库，数据库压力激增，缓存失去了保护作用。在高并发场景下可能导致数据库连接耗尽甚至宕机。
+
+**问题三：缓存更新竞态条件**
+
+两种更新策略在并发环境下都存在问题：
+
+| 策略 | 问题 | 影响 |
+|------|------|------|
+| 先删缓存 → 更新DB | 可能缓存脏数据 | **长期不一致** ❌ |
+| 先更新DB → 删缓存 | 短暂返回旧数据 | 毫秒级，自动恢复 ✅ |
+
+**策略一的竞态条件**（先删缓存）：
+```text
+时刻1: T1 删除缓存
+时刻2: T2 读缓存(miss) → 查询DB(旧值v1)
+时刻3: T1 更新DB(新值v2)
+时刻4: T2 将旧值v1写入缓存
+结果: 数据库是v2，缓存是v1，长期不一致
+```
+
+**策略二的竞态条件**（先更新DB）：
+```text
+时刻1: T1 读缓存(v1)
+时刻2: T2 更新DB(v2) → 删除缓存
+时刻3: T1 将旧值v1写回缓存
+结果: 短暂不一致，下次查询会miss并从DB获取v2
+```
+
+推荐使用"先更新DB，再删缓存"策略，虽然仍有短暂的不一致窗口，但影响相对较小且会自动恢复。使用读写锁可以进一步解决这个问题。
+
+### 解决方案：使用读写锁
+
+使用 ReentrantReadWriteLock 解决上述问题：
+
+```java
+public class SqlCacheWithRWLock {
+    private final Map<String, Object> cache = new ConcurrentHashMap<>();  // 使用线程安全的Map
+    private final ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
+    private final Lock readLock = rwl.readLock();
+    private final Lock writeLock = rwl.writeLock();
+
+    public Object query(String sql, Object... params) {
+        String key = buildKey(sql, params);
+
+        // 1. 读锁：多线程可并发读取缓存
+        readLock.lock();
+        try {
+            Object result = cache.get(key);
+            if (result != null) return result;
+        } finally {
+            readLock.unlock();
+        }
+
+        // 2. 写锁：缓存未命中，加载数据
+        writeLock.lock();
+        try {
+            // 双重检查：避免重复加载
+            Object result = cache.get(key);
+            if (result != null) return result;
+
+            result = queryDatabase(sql, params);
+            cache.put(key, result);
+            return result;
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    public void update(String sql, Object... params) {
+        // 写锁：确保更新操作原子性
+        writeLock.lock();
+        try {
+            cache.clear();            // 先删缓存
+            updateDatabase(sql, params);  // 再更新DB
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    private String buildKey(String sql, Object... params) {
+        return sql + ":" + Arrays.toString(params);
+    }
+
+    private Object queryDatabase(String sql, Object... params) {
+        try { Thread.sleep(100); } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        return "Result for: " + sql;
+    }
+
+    private void updateDatabase(String sql, Object... params) {
+        try { Thread.sleep(50); } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+}
+```
+
+**方案优势**：
+
+1. **读并发性能高**：
+   - 多个查询线程可以同时持有读锁并发访问缓存，不会相互阻塞
+   - 只有在缓存未命中时才需要竞争写锁，大部分情况下（缓存命中）都是高并发读取
+   - 解决了 synchronized 方案中所有操作都串行执行的性能瓶颈
+
+2. **写操作原子性保证**：
+   - 更新操作获取写锁时会阻塞所有读写操作，独占访问
+   - 确保"删除缓存 + 更新数据库"这两步是原子的，不会被查询操作打断
+   - 避免了问题三中的竞态条件：更新期间不会有线程读到不一致的状态
+
+3. **双重检查防止缓存击穿**：
+   - 第一次检查（读锁）：快速判断缓存是否存在，命中则直接返回
+   - 第二次检查（写锁）：获取写锁后再次确认，防止多个线程重复加载
+   - 解决了问题二：即使多个线程同时发现缓存为空，也只有第一个获得写锁的线程会查询数据库，其他线程获取写锁后会发现缓存已被填充
+
+**执行流程示例**：
+
+**场景一：缓存命中（常见情况）**
+```text
+T1, T2, T3 同时请求相同的查询：
+T1: 获取读锁 → 读缓存(命中) → 释放读锁 → 返回结果
+T2: 获取读锁 → 读缓存(命中) → 释放读锁 → 返回结果
+T3: 获取读锁 → 读缓存(命中) → 释放读锁 → 返回结果
+
+✅ 三个线程完全并发执行，互不阻塞
+```
+
+**场景二：缓存未命中（首次查询）**
+```text
+T1, T2, T3 同时请求未缓存的查询：
+T1: 读锁(未命中) → 释放读锁 → 获取写锁 → 双重检查 → 查询DB → 写缓存 → 释放写锁
+T2: 读锁(未命中) → 释放读锁 → [等待T1的写锁] → 获取写锁 → 双重检查(已有) → 释放写锁 → 返回结果
+T3: 读锁(未命中) → 释放读锁 → [等待写锁] → 获取写锁 → 双重检查(已有) → 释放写锁 → 返回结果
+
+✅ 只有T1查询数据库，T2和T3复用T1加载的缓存
+```
+
+**场景三：更新数据（保证一致性）**
+```text
+T1 执行更新，T2 执行查询：
+T1: 获取写锁 → 清空缓存 → 更新DB → 释放写锁
+T2: [等待T1的写锁释放] → 获取读锁 → 读缓存(未命中) → 释放读锁 → 获取写锁 → 查询DB(最新数据) → 写缓存 → 释放写锁
+
+✅ T2 在T1更新完成后才能读取，确保读到的是最新数据
+```
+
+**性能对比**：
+
+| 方案 | 并发读 | 并发写 | 读写混合 |
+|------|--------|--------|----------|
+| 无锁 | ❌ 数据不一致 | ❌ 数据不一致 | ❌ 竞态条件 |
+| synchronized | ❌ 串行执行 | ✅ 串行执行 | ❌ 全部串行 |
+| ReadWriteLock | ✅ 并发执行 | ✅ 串行执行 | ✅ 读可并发 |
+
+**示例**（100 读 + 1 写）：synchronized 需 101 × 单次耗时，ReadWriteLock 仅需 1 × 读耗时 + 1 × 写耗时。
+
+:::tip 小结
+读写锁通过**读锁共享 + 写锁独占**的设计，在读多写少场景下实现高并发读取，同时保证写操作的原子性和数据一致性。核心机制包括：双重检查防止缓存击穿、写锁保护更新流程、ConcurrentHashMap 保证线程安全。
+:::
 
 ## 状态表示
 
