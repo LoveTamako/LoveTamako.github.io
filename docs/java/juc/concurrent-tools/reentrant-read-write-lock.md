@@ -591,6 +591,197 @@ protected final int tryAcquireShared(int unused) {
    - 第一个读线程：使用 `firstReader` 和 `firstReaderHoldCount`（避免 ThreadLocal 开销）
    - 其他线程：使用 `cachedHoldCounter` 缓存或 ThreadLocal
 
+#### fullTryAcquireShared 完整获取流程
+
+当快速路径失败时（CAS 失败、需要阻塞、或读锁重入），会进入 `fullTryAcquireShared` 方法：
+
+```java
+// ReentrantReadWriteLock.Sync
+final int fullTryAcquireShared(Thread current) {
+    HoldCounter rh = null;
+    for (;;) {  // 自旋
+        int c = getState();
+
+        // 1. 检查写锁
+        if (exclusiveCount(c) != 0) {
+            if (getExclusiveOwnerThread() != current)
+                return -1;  // 其他线程持有写锁，获取失败
+            // 当前线程持有写锁，可以继续（锁降级）
+        }
+
+        // 2. 检查是否需要阻塞
+        else if (readerShouldBlock()) {
+            // 如果是第一个读线程，不需要阻塞
+            if (firstReader == current) {
+                // 继续
+            } else {
+                // 检查当前线程是否已经持有读锁
+                if (rh == null) {
+                    rh = cachedHoldCounter;
+                    if (rh == null || rh.tid != current.getId()) {
+                        rh = readHolds.get();
+                        if (rh.count == 0)
+                            readHolds.remove();  // 如果没有持有，移除 ThreadLocal
+                    }
+                }
+                if (rh.count == 0)
+                    return -1;  // 当前线程未持有读锁，需要排队
+            }
+        }
+
+        // 3. 检查读锁计数是否超限
+        if (sharedCount(c) == MAX_COUNT)
+            throw new Error("Maximum lock count exceeded");
+
+        // 4. CAS 获取读锁
+        if (compareAndSetState(c, c + SHARED_UNIT)) {
+            // 更新持有计数
+            if (sharedCount(c) == 0) {
+                firstReader = current;
+                firstReaderHoldCount = 1;
+            } else if (firstReader == current) {
+                firstReaderHoldCount++;
+            } else {
+                if (rh == null)
+                    rh = cachedHoldCounter;
+                if (rh == null || rh.tid != current.getId())
+                    rh = readHolds.get();
+                else if (rh.count == 0)
+                    readHolds.set(rh);
+                rh.count++;
+                cachedHoldCounter = rh;
+            }
+            return 1;  // 获取成功
+        }
+        // CAS 失败，继续循环
+    }
+}
+```
+
+**流程分析**：
+
+1. **写锁检查**：
+   - 如果有其他线程持有写锁，返回 -1（失败）
+   - 如果当前线程持有写锁，允许继续（支持锁降级）
+
+2. **阻塞检查**：
+   - 调用 `readerShouldBlock()` 判断是否需要阻塞
+   - **特殊处理**：如果当前线程已经持有读锁（重入），即使需要阻塞也允许继续
+   - 这避免了重入时进入队列导致的死锁问题
+
+3. **读锁计数检查**：检查是否超过最大值（65535）
+
+4. **自旋 CAS**：
+   - 循环尝试 CAS 修改 state
+   - 成功后更新线程持有计数
+   - 失败则继续循环
+
+#### doAcquireShared 进入等待队列
+
+当 `tryAcquireShared` 和 `fullTryAcquireShared` 都返回负数（获取失败）时，线程会调用 `doAcquireShared` 进入同步队列等待：
+
+```java
+// AbstractQueuedSynchronizer
+private void doAcquireShared(int arg) {
+    // 1. 将当前线程包装成共享模式节点加入队列
+    final Node node = addWaiter(Node.SHARED);
+    boolean failed = true;
+    try {
+        boolean interrupted = false;
+        for (;;) {  // 自旋
+            final Node p = node.predecessor();
+
+            // 2. 如果前驱是 head，尝试获取锁
+            if (p == head) {
+                int r = tryAcquireShared(arg);
+                if (r >= 0) {
+                    // 获取成功，设置为新的 head 并传播唤醒
+                    setHeadAndPropagate(node, r);
+                    p.next = null; // help GC
+                    if (interrupted)
+                        selfInterrupt();
+                    failed = false;
+                    return;
+                }
+            }
+
+            // 3. 获取失败，判断是否需要阻塞
+            if (shouldParkAfterFailedAcquire(p, node) &&
+                parkAndCheckInterrupt())
+                interrupted = true;
+        }
+    } finally {
+        if (failed)
+            cancelAcquire(node);
+    }
+}
+```
+
+**流程分析**：
+
+1. **加入队列**：
+   - 将当前线程包装成 `Node.SHARED`（共享模式）节点
+   - 通过 `addWaiter` 加入同步队列尾部
+
+2. **自旋尝试获取**：
+   - 如果前驱节点是 head（说明轮到自己了），调用 `tryAcquireShared` 再次尝试获取
+   - 获取成功（返回值 >= 0）：调用 `setHeadAndPropagate` 设置新的 head 并**传播唤醒后续的共享节点**
+
+3. **阻塞等待**：
+   - 如果获取失败，调用 `shouldParkAfterFailedAcquire` 判断是否需要阻塞
+   - 需要阻塞则调用 `parkAndCheckInterrupt` 将线程挂起
+   - 被唤醒后继续循环尝试获取
+
+#### setHeadAndPropagate 传播唤醒机制
+
+共享锁的核心特性是**传播唤醒**：当一个读线程获取锁成功后，会唤醒后续等待的读线程，形成连锁反应。
+
+```java
+// AbstractQueuedSynchronizer
+private void setHeadAndPropagate(Node node, int propagate) {
+    Node h = head;
+    setHead(node);  // 将当前节点设置为新的 head
+
+    // 判断是否需要传播唤醒
+    if (propagate > 0 || h == null || h.waitStatus < 0 ||
+        (h = head) == null || h.waitStatus < 0) {
+        Node s = node.next;
+        // 如果后继节点是共享模式，唤醒它
+        if (s == null || s.isShared())
+            doReleaseShared();
+    }
+}
+```
+
+**传播唤醒的意义**：
+
+当写锁释放后，如果队列中有多个读线程在等待：
+
+```text
+初始状态：head → Writer(释放中) → Reader1(等待) → Reader2(等待) → Reader3(等待)
+
+1. Writer 释放写锁，唤醒 Reader1
+   head → Reader1(被唤醒) → Reader2(等待) → Reader3(等待)
+
+2. Reader1 获取成功，调用 setHeadAndPropagate
+   head(Reader1) → Reader2(等待) → Reader3(等待)
+
+3. Reader1 检查后继是共享节点，调用 doReleaseShared 唤醒 Reader2
+   head(Reader1) → Reader2(被唤醒) → Reader3(等待)
+
+4. Reader2 获取成功，继续传播唤醒 Reader3
+   head(Reader2) → Reader3(被唤醒)
+
+5. Reader3 获取成功
+   head(Reader3)
+
+结果：所有读线程都被唤醒并成功获取读锁，实现并发读取
+```
+
+**与独占锁的对比**：
+- **独占锁**：只唤醒一个线程，下一个线程释放时再唤醒后续线程
+- **共享锁**：连续唤醒所有等待的共享节点（直到遇到独占节点）
+
 ### 读锁解锁流程
 
 #### unlock() 方法
