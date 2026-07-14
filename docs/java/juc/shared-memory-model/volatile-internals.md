@@ -342,11 +342,71 @@ public final class Singleton {
 这样就避免了指令重排序导致的问题。
 
 ::: tip 其他方案
-除了 DCL，还有其他线程安全的单例实现方式：
+虽然 DCL 加上 `volatile` 可以正确工作，但在现代 Java 开发中**不再推荐使用**：
+- 代码复杂且容易出错（忘记 volatile 会导致严重问题）
+- 性能优势不明显（synchronized 优化后性能已足够好）
+- 有更简洁且同样高效的替代方案
+
+推荐使用以下方案：
 1. **饿汉式**：类加载时就创建实例（简单但不支持懒加载）
 2. **静态内部类**：利用类加载机制保证线程安全（推荐）
 3. **枚举单例**：最简洁且天然线程安全（推荐）
 :::
+
+### 静态内部类实现
+
+静态内部类是实现懒加载单例的最佳方案，它结合了懒加载和线程安全的优势，且无需使用 `synchronized` 或 `volatile`。
+
+#### 实现代码
+
+```java
+public final class Singleton {
+    private Singleton() {}
+
+    // 静态内部类
+    private static class LazyHolder {
+        static final Singleton INSTANCE = new Singleton();
+    }
+
+    public static Singleton getInstance() {
+        return LazyHolder.INSTANCE;
+    }
+}
+```
+
+#### 原理分析
+
+这种实现方式利用了 **JVM 类加载机制**的两个关键特性：
+
+**1. 延迟加载（懒加载）**
+
+静态内部类不会在外部类加载时就被加载：
+- 当 `Singleton` 类被加载时，`LazyHolder` 类并不会被加载
+- 只有首次调用 `getInstance()` 时，才会触发 `LazyHolder` 的加载
+- `LazyHolder` 加载时会初始化静态字段 `INSTANCE`，创建单例对象
+
+#### 线程安全保证
+
+**2. 类加载的线程安全性**
+
+JVM 在加载类时会确保线程安全，这是由 **类加载器的同步机制**保证的：
+
+```java
+// JVM 类加载的伪代码逻辑
+synchronized (classLoaderLock) {
+    if (!isClassLoaded(LazyHolder.class)) {
+        // 1. 加载 LazyHolder 类
+        // 2. 初始化静态字段 INSTANCE
+        // 3. 标记类已加载
+    }
+}
+```
+
+**关键点**：
+- JVM 规范保证类的初始化阶段是线程安全的
+- 多个线程同时首次调用 `getInstance()`，JVM 会确保 `LazyHolder` 只被初始化一次
+- 类加载器使用内部锁机制，确保只有一个线程执行类的初始化代码
+- 其他线程会等待初始化完成后直接使用已创建的实例
 
 ## happens-before
 
