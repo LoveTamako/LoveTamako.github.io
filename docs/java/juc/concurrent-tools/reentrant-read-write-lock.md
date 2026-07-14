@@ -757,6 +757,8 @@ private void setHeadAndPropagate(Node node, int propagate) {
 
 当写锁释放后，如果队列中有多个读线程在等待：
 
+**场景一：连续的读线程（全部唤醒）**
+
 ```text
 初始状态：head → Writer(释放中) → Reader1(等待) → Reader2(等待) → Reader3(等待)
 
@@ -777,6 +779,33 @@ private void setHeadAndPropagate(Node node, int propagate) {
 
 结果：所有读线程都被唤醒并成功获取读锁，实现并发读取
 ```
+
+**场景二：队列中有写线程（传播中断）**
+
+```text
+初始状态：head → Writer1(释放中) → Reader1(等待) → Reader2(等待) → Writer2(等待) → Reader3(等待)
+
+1. Writer1 释放写锁，唤醒 Reader1
+   head → Reader1(被唤醒) → Reader2(等待) → Writer2(等待) → Reader3(等待)
+
+2. Reader1 获取成功，调用 setHeadAndPropagate
+   head(Reader1) → Reader2(等待) → Writer2(等待) → Reader3(等待)
+
+3. Reader1 检查后继是共享节点，调用 doReleaseShared 唤醒 Reader2
+   head(Reader1) → Reader2(被唤醒) → Writer2(等待) → Reader3(等待)
+
+4. Reader2 获取成功，继续传播
+   head(Reader2) → Writer2(等待) → Reader3(等待)
+
+5. Reader2 检查后继是独占节点(Writer2)，停止传播
+   Writer2 和 Reader3 保持等待状态
+
+结果：传播在 Writer2 处停止，Reader3 不会被唤醒，需要等待 Writer2 执行完毕
+```
+
+:::tip 重要说明
+读锁的共享传播不会跨越等待队列中的写锁节点（独占节点）。这保证了写线程不会被无限期饿死，即使有连续的读请求到来，队列中等待的写线程最终也能获得执行机会。
+:::
 
 **与独占锁的对比**：
 - **独占锁**：只唤醒一个线程，下一个线程释放时再唤醒后续线程
@@ -960,6 +989,38 @@ try {
 ## 公平性实现
 
 ReentrantReadWriteLock 支持公平锁和非公平锁两种模式。
+
+### 公平与非公平的含义
+
+**公平锁（Fair Lock）**：
+- 线程按照**请求锁的顺序**获取锁（FIFO 原则）
+- 新到达的线程必须排队，即使此时锁是空闲的
+- 优点：避免线程饥饿，保证每个线程最终都能获得锁
+- 缺点：性能较低，因为需要频繁的线程上下文切换
+
+**非公平锁（Nonfair Lock）**：
+- 新到达的线程可以**直接尝试获取锁**，无需排队
+- 如果锁恰好空闲，新线程可以立即获得锁，即使队列中有等待的线程
+- 优点：吞吐量高，减少线程切换开销
+- 缺点：可能导致某些线程长期得不到锁（饥饿问题）
+
+**示例对比**：
+
+```text
+场景：T1 持有锁，T2 在队列中等待，T3 新到达
+
+公平锁：
+  T1 释放 → T2 获取（按队列顺序） → T3 进入队列等待
+
+非公平锁：
+  T1 释放 → T3 可能直接获取（插队成功） → T2 继续等待
+  或者
+  T1 释放 → T2 获取（T3 插队失败） → T3 进入队列
+```
+
+对于读写锁，公平性的含义稍有不同：
+- **公平模式**：读写线程都严格按照请求顺序获取锁
+- **非公平模式**：写线程可以插队，读线程在特定条件下也可以插队（但有防止写线程饥饿的机制）
 
 ### 公平锁与非公平锁
 
