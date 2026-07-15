@@ -1,857 +1,282 @@
 # StampedLock
 
-`StampedLock` 是 Java 8 引入的一种改进的读写锁,提供了比 `ReentrantReadWriteLock` 更好的性能,特别是在读多写少的场景下。它的核心特性是**乐观读(Optimistic Read)**,允许读操作不阻塞写操作,从而显著提升并发性能。
+`StampedLock` 是 Java 8 引入的一种改进型读写锁，位于 `java.util.concurrent.locks` 包中。它在 `ReentrantReadWriteLock` 的基础上引入了**乐观读（Optimistic Read）**机制，在读多写少的场景下能获得更好的性能。
 
-## 为什么需要 StampedLock
+StampedLock 提供三种锁模式：
 
-`ReentrantReadWriteLock` 虽然允许多个读线程并发访问,但仍然存在一些限制:
+- **写锁（Write Lock）**：独占锁，与 `ReentrantReadWriteLock` 的写锁类似
+  ```java
+  long stamp = sl.writeLock();       // 阻塞式获取写锁
+  long stamp = sl.tryWriteLock();    // 非阻塞式尝试获取写锁
+  sl.unlockWrite(stamp);             // 释放写锁
+  ```
 
-1. **读锁会阻塞写线程**:即使是短时间的读操作,也会阻止写线程获取锁
-2. **写锁饥饿问题**:在非公平模式下,连续的读操作可能让写线程长时间等待
-3. **锁开销**:即使是读操作,也需要进行 CAS 操作来获取和释放锁
+- **悲观读锁（Pessimistic Read Lock）**：共享锁，与 `ReentrantReadWriteLock` 的读锁类似
+  ```java
+  long stamp = sl.readLock();        // 阻塞式获取读锁
+  long stamp = sl.tryReadLock();     // 非阻塞式尝试获取读锁
+  sl.unlockRead(stamp);              // 释放读锁
+  ```
 
-`StampedLock` 通过引入**乐观读**机制解决了这些问题:
-- 读操作不需要加锁,只需验证数据是否被修改
-- 写操作不会被读操作阻塞(乐观读模式下)
-- 大幅减少了锁竞争,提升了性能
+- **乐观读（Optimistic Read）**：一种无锁的读取方式，核心优势所在
+  ```java
+  long stamp = sl.tryOptimisticRead();  // 获取乐观读戳记（不加锁）
+  // ... 读取数据 ...
+  if (!sl.validate(stamp)) {            // 验证戳记是否有效
+      // 验证失败，需要升级为悲观读锁
+  }
+  ```
 
-## 核心概念
+## 乐观读机制
 
-### 戳记 (Stamp)
+乐观读是 StampedLock 的核心特性，它的工作原理类似于数据库的 MVCC（多版本并发控制）：
 
-`StampedLock` 的所有锁操作都会返回一个 `long` 类型的**戳记(stamp)**,这个戳记代表了锁的状态:
+1. **获取戳记**：调用 `tryOptimisticRead()` 获取一个版本戳记（stamp），此操作不会阻塞写线程
+2. **读取数据**：使用获取的戳记读取共享数据
+3. **验证戳记**：调用 `validate(stamp)` 检查期间是否有写操作发生
+4. **处理失败**：如果验证失败，说明数据可能被修改，需要重新读取或升级为悲观读锁
 
-```java
-StampedLock lock = new StampedLock();
-
-long stamp = lock.writeLock();  // 获取写锁,返回戳记
-// ... 执行写操作
-lock.unlockWrite(stamp);        // 使用戳记释放写锁
-```
-
-**戳记的作用**:
-- 标识锁的状态和版本
-- 释放锁时必须提供正确的戳记
-- 用于验证数据是否被修改(乐观读)
-- 支持锁的转换(如从悲观读转为写锁)
-
-### 三种锁模式
-
-`StampedLock` 支持三种锁模式:
-
-| 模式 | 特点 | 使用场景 |
-|------|------|----------|
-| **写锁(Write Lock)** | 独占锁,排斥所有其他锁 | 修改共享数据 |
-| **悲观读锁(Pessimistic Read)** | 共享锁,允许多个读线程,阻塞写线程 | 需要确保读取期间数据不变 |
-| **乐观读(Optimistic Read)** | 不加锁,读取后验证数据是否被修改 | 读多写少,读操作非常快 |
-
-**锁的兼容性**:
-
-|  | 写锁 | 悲观读锁 | 乐观读 |
-|---|-----|---------|-------|
-| **写锁** | ❌ 互斥 | ❌ 互斥 | ❌ 互斥 |
-| **悲观读锁** | ❌ 互斥 | ✅ 兼容 | ❌ 互斥 |
-| **乐观读** | ❌ 互斥 | ❌ 互斥 | ✅ 兼容 |
-
-:::warning 重要特性
-- **不可重入**:StampedLock 不支持重入,同一线程重复获取锁会导致死锁
-- **无条件变量**:不支持 Condition,无法使用 await/signal 机制
-- **不支持中断**:某些方法(如 `writeLock()`)不响应中断,需要使用可中断版本(如 `writeLockInterruptibly()`)
-:::
+这种机制避免了读操作对写操作的阻塞，在读操作远多于写操作时能显著提升性能。
 
 ## 基本使用示例
 
-### 写锁示例
-
-写锁是独占锁,用于修改共享数据:
-
-```java
-public class Point {
-    private double x, y;
-    private final StampedLock lock = new StampedLock();
-
-    public void move(double deltaX, double deltaY) {
-        long stamp = lock.writeLock();  // 获取写锁
-        try {
-            x += deltaX;
-            y += deltaY;
-        } finally {
-            lock.unlockWrite(stamp);     // 释放写锁
-        }
-    }
-}
-```
-
-### 悲观读锁示例
-
-悲观读锁是共享锁,用于读取数据时确保数据不被修改:
-
-```java
-public double distanceFromOrigin() {
-    long stamp = lock.readLock();  // 获取悲观读锁
-    try {
-        return Math.sqrt(x * x + y * y);
-    } finally {
-        lock.unlockRead(stamp);     // 释放读锁
-    }
-}
-```
-
 ### 乐观读示例
 
-乐观读是 StampedLock 的核心特性,读取时不加锁,读取后验证数据是否被修改:
+以下示例演示了多线程场景下，乐观读验证失败后升级为悲观读锁的情况：
 
 ```java
-public double distanceFromOriginOptimistic() {
-    long stamp = lock.tryOptimisticRead();  // 尝试乐观读
-    double currentX = x;
-    double currentY = y;
-
-    if (!lock.validate(stamp)) {  // 验证数据是否被修改
-        // 数据被修改,升级为悲观读锁
-        stamp = lock.readLock();
-        try {
-            currentX = x;
-            currentY = y;
-        } finally {
-            lock.unlockRead(stamp);
-        }
-    }
-
-    return Math.sqrt(currentX * currentX + currentY * currentY);
-}
-```
-
-**乐观读的执行流程**:
-1. 调用 `tryOptimisticRead()` 获取戳记(不加锁)
-2. 读取共享变量到本地变量
-3. 调用 `validate(stamp)` 验证数据是否被修改
-4. 如果验证失败,升级为悲观读锁重新读取
-
-## 乐观读模式详解
-
-### 乐观读的工作原理
-
-乐观读是 StampedLock 最重要的特性,它基于**版本验证**机制:
-
-```java
-// 内部实现简化版
-public long tryOptimisticRead() {
-    long s = state;
-    // 如果没有写锁,返回当前状态(版本号)
-    return (s & WBIT) == 0L ? s : 0L;
-}
-
-public boolean validate(long stamp) {
-    // 验证版本号是否与当前状态一致
-    return (stamp & SBITS) == (state & SBITS);
-}
-```
-
-**核心机制**:
-- `tryOptimisticRead()` 返回当前锁的状态版本
-- 读取数据期间不持有任何锁
-- `validate()` 检查版本号是否改变
-- 如果版本号未变,说明期间没有写操作,读取的数据是有效的
-
-### 乐观读的性能优势
-
-**与悲观读锁的对比**:
-
-```java
-// 场景:10个读线程并发读取
-
-// 悲观读锁
-public void pessimisticRead() {
-    long stamp = lock.readLock();  // CAS 操作获取读锁
-    try {
-        // 读取数据
-    } finally {
-        lock.unlockRead(stamp);     // CAS 操作释放读锁
-    }
-}
-// 性能:每次读取需要2次CAS操作(加锁+解锁)
-
-// 乐观读
-public void optimisticRead() {
-    long stamp = lock.tryOptimisticRead();  // 仅读取state
-    // 读取数据
-    if (!lock.validate(stamp)) {            // 仅读取state比较
-        // 升级为悲观读(罕见情况)
-    }
-}
-// 性能:常见情况下只需要2次内存读取,无CAS竞争
-```
-
-**性能提升原因**:
-1. **无锁开销**:不需要 CAS 操作,避免了缓存行竞争
-2. **无阻塞**:读线程之间完全不阻塞
-3. **写操作不被阻塞**:写线程不需要等待乐观读完成
-
-### 何时使用乐观读
-
-**适用场景**:
-- ✅ 读操作远多于写操作(比例 > 100:1)
-- ✅ 读操作非常快速(微秒级)
-- ✅ 共享变量数量少(1-3个)
-- ✅ 可以接受偶尔重试
-
-**不适用场景**:
-- ❌ 读操作耗时长(如涉及 I/O 操作)
-- ❌ 写操作频繁(导致频繁验证失败)
-- ❌ 需要读取大量变量(复制成本高)
-- ❌ 必须保证强一致性(无法接受重试)
-
-### 乐观读的常见陷阱
-
-**陷阱1:忘记验证**
-
-```java
-// ❌ 错误:忘记验证
-public double getX() {
-    long stamp = lock.tryOptimisticRead();
-    return x;  // 可能读到不一致的数据
-}
-
-// ✅ 正确:必须验证
-public double getX() {
-    long stamp = lock.tryOptimisticRead();
-    double currentX = x;
-    if (!lock.validate(stamp)) {
-        stamp = lock.readLock();
-        try {
-            currentX = x;
-        } finally {
-            lock.unlockRead(stamp);
-        }
-    }
-    return currentX;
-}
-```
-
-**陷阱2:在验证前执行耗时操作**
-
-```java
-// ❌ 错误:复制后执行耗时计算再验证
-public Result compute() {
-    long stamp = lock.tryOptimisticRead();
-    Data data = copyData();
-    Result result = expensiveComputation(data);  // 耗时操作
-    if (!lock.validate(stamp)) {  // 此时验证已无意义
-        // ...
-    }
-    return result;
-}
-
-// ✅ 正确:先验证,再执行耗时操作
-public Result compute() {
-    long stamp = lock.tryOptimisticRead();
-    Data data = copyData();
-    if (!lock.validate(stamp)) {  // 立即验证
-        stamp = lock.readLock();
-        try {
-            data = copyData();
-        } finally {
-            lock.unlockRead(stamp);
-        }
-    }
-    return expensiveComputation(data);  // 验证通过后再计算
-}
-```
-
-**陷阱3:未处理 stamp == 0 的情况**
-
-```java
-// ❌ 可能有问题:未检查 stamp 是否为 0
-public double getDistance() {
-    long stamp = lock.tryOptimisticRead();  // 如果有写锁,返回0
-    double dx = x;
-    double dy = y;
-    if (!lock.validate(stamp)) {  // stamp为0时,validate也会返回false
-        // 升级为悲观读
-    }
-    return Math.sqrt(dx * dx + dy * dy);
-}
-
-// ✅ 更清晰的写法
-public double getDistance() {
-    long stamp = lock.tryOptimisticRead();
-    if (stamp == 0) {  // 明确检查
-        stamp = lock.readLock();
-        try {
-            return Math.sqrt(x * x + y * y);
-        } finally {
-            lock.unlockRead(stamp);
-        }
-    }
-    // 乐观读逻辑
-    // ...
-}
-```
-
-## 锁转换机制
-
-StampedLock 支持在不释放锁的情况下进行**锁模式转换**,这是一个非常实用的特性。
-
-### 三种转换方法
-
-StampedLock 提供了三个转换方法:
-
-| 方法 | 说明 | 返回值 |
-|------|------|--------|
-| `tryConvertToWriteLock(long stamp)` | 尝试将读锁或乐观读转换为写锁 | 成功返回新stamp,失败返回0 |
-| `tryConvertToReadLock(long stamp)` | 尝试将写锁转换为读锁(锁降级) | 成功返回新stamp,失败返回0 |
-| `tryConvertToOptimisticRead(long stamp)` | 尝试将读锁或写锁转换为乐观读 | 成功返回新stamp,失败返回0 |
-
-### 转换示例
-
-**示例1:读锁升级为写锁**
-
-```java
-public void moveIfAtOrigin(double newX, double newY) {
-    long stamp = lock.readLock();  // 先获取读锁
-    try {
-        // 检查条件
-        while (x == 0.0 && y == 0.0) {
-            // 尝试将读锁转换为写锁
-            long writeStamp = lock.tryConvertToWriteLock(stamp);
-            if (writeStamp != 0L) {
-                // 转换成功
-                stamp = writeStamp;
-                x = newX;
-                y = newY;
-                break;
-            } else {
-                // 转换失败,释放读锁,重新获取写锁
-                lock.unlockRead(stamp);
-                stamp = lock.writeLock();
-            }
-        }
-    } finally {
-        lock.unlock(stamp);  // 统一释放
-    }
-}
-```
-
-**示例2:写锁降级为读锁**
-
-```java
-public Data processData() {
-    long stamp = lock.writeLock();
-    try {
-        // 修改数据
-        updateInternalState();
-
-        // 降级为读锁
-        stamp = lock.tryConvertToReadLock(stamp);
-
-        // 此时其他线程可以并发读取
-        return computeResult();
-    } finally {
-        lock.unlock(stamp);
-    }
-}
-```
-
-**示例3:悲观读转换为乐观读**
-
-```java
-public String getData() {
-    long stamp = lock.readLock();
-    try {
-        // 读取数据
-        String data = this.data;
-
-        // 转换为乐观读,释放读锁
-        stamp = lock.tryConvertToOptimisticRead(stamp);
-
-        // 此时不持有锁,可以进行耗时操作
-        return processData(data);
-    } finally {
-        if (StampedLock.isReadLockStamp(stamp) ||
-            StampedLock.isWriteLockStamp(stamp)) {
-            lock.unlock(stamp);
-        }
-    }
-}
-```
-
-### 转换的优势
-
-**避免死锁**:
-- 传统方式:先释放读锁,再获取写锁 → 可能导致死锁
-- 转换方式:原子性地完成转换 → 避免死锁
-
-**性能更好**:
-- 转换成功时,无需释放和重新获取锁
-- 减少了锁竞争和上下文切换
-
-**使用建议**:
-- ✅ 当需要根据读取结果决定是否写入时,使用读→写转换
-- ✅ 当写入后需要读取结果时,使用写→读转换(锁降级)
-- ✅ 当持有读锁但需要执行耗时操作时,使用读→乐观读转换
-- ⚠️ 转换可能失败(返回0),必须处理失败情况
-
-## 实现原理
-
-### 状态表示
-
-StampedLock 使用一个 `long` 类型的 `state` 字段来表示锁的状态:
-
-```java
-// StampedLock 核心字段
-private transient volatile long state;
-
-// 关键常量
-private static final int LG_READERS = 7;
-private static final long RUNIT = 1L;              // 读锁计数单位
-private static final long WBIT  = 1L << LG_READERS; // 写锁标志位(第8位)
-private static final long RBITS = WBIT - 1L;        // 读锁位掩码(低7位)
-private static final long RFULL = RBITS - 1L;       // 最大读锁数(126)
-private static final long ABITS = RBITS | WBIT;     // 所有锁位掩码
-private static final long SBITS = ~RBITS;           // 戳记位掩码(高57位)
-```
-
-**状态结构**（64位）:
-
-```text
-|--- 56位:序列号(版本号) ---|1位:写锁|--- 7位:读锁计数 ---|
-|        高位部分            |  第8位 |      低7位        |
-```
-
-**示例**:
-
-```text
-无锁状态:
-0000...0000 | 0 | 0000000
-            写锁  读锁计数=0
-
-持有写锁:
-0000...0001 | 1 | 0000000
-序列号+1     写锁  读锁计数=0
-
-持有3个读锁:
-0000...0000 | 0 | 0000011
-            无写锁 读锁计数=3
-```
-
-### 戳记的组成
-
-戳记(stamp)由**序列号**和**锁状态**组成:
-
-```java
-// 获取写锁时返回的戳记
-long stamp = state;  // 包含序列号 + 写锁位 + 读锁计数
-
-// 验证戳记
-public boolean validate(long stamp) {
-    // 只比较序列号部分,忽略低8位的锁状态
-    return (stamp & SBITS) == (state & SBITS);
-}
-```
-
-**为什么需要序列号**:
-- 序列号在每次写锁释放时递增
-- 用于检测是否发生过写操作
-- 乐观读通过比较序列号判断数据是否被修改
-
-### 核心操作简化实现
-
-**写锁获取**:
-
-```java
-public long writeLock() {
-    long s, next;
-    // 如果无锁(state & ABITS == 0),CAS设置写锁位
-    return ((((s = state) & ABITS) == 0L &&
-             U.compareAndSwapLong(this, STATE, s, next = s + WBIT)) ?
-            next : acquireWrite(false, 0L));
-}
-```
-
-**写锁释放**:
-
-```java
-public void unlockWrite(long stamp) {
-    if (state != stamp || (stamp & WBIT) == 0L)
-        throw new IllegalMonitorStateException();
-    // 释放写锁:序列号+1,清除写锁位
-    state = (stamp += WBIT) == 0L ? ORIGIN : stamp;
-}
-```
-
-**乐观读**:
-
-```java
-public long tryOptimisticRead() {
-    long s;
-    // 如果无写锁,返回当前state(包含序列号)
-    return (((s = state) & WBIT) == 0L) ? (s & SBITS) : 0L;
-}
-
-public boolean validate(long stamp) {
-    U.loadFence();  // 内存屏障,确保可见性
-    // 比较序列号部分是否相同
-    return (stamp & SBITS) == (state & SBITS);
-}
-```
-
-### 关键设计
-
-**1. 读锁计数限制**:
-- 只使用7位存储读锁计数,最多126个读锁
-- 超过126个读锁时会溢出到一个额外的计数器 `readerOverflow`
-
-**2. 序列号递增**:
-- 写锁释放时,序列号自动+1（`state += WBIT`）
-- 确保乐观读可以检测到写操作
-
-**3. 内存可见性**:
-- `state` 是 `volatile` 变量
-- `validate()` 使用内存屏障确保读取最新值
-
-## StampedLock vs ReentrantReadWriteLock
-
-### 功能对比
-
-| 特性 | StampedLock | ReentrantReadWriteLock |
-|------|-------------|------------------------|
-| **乐观读** | ✅ 支持,核心特性 | ❌ 不支持 |
-| **读写锁** | ✅ 支持 | ✅ 支持 |
-| **可重入** | ❌ 不支持 | ✅ 支持 |
-| **条件变量** | ❌ 不支持 | ✅ 支持(写锁) |
-| **公平性** | ❌ 只支持非公平 | ✅ 支持公平/非公平 |
-| **锁转换** | ✅ 支持 | ✅ 支持(仅锁降级) |
-| **中断响应** | 部分方法支持 | ✅ 完全支持 |
-| **基于** | CLH 队列 | AQS |
-| **引入版本** | Java 8 | Java 5 |
-
-### 性能对比
-
-**读多写少场景**（读写比 100:1）:
-
-| 操作类型 | ReentrantReadWriteLock | StampedLock(悲观读) | StampedLock(乐观读) |
-|---------|----------------------|-------------------|-------------------|
-| **读操作** | 需要 CAS 获取/释放锁 | 需要 CAS 获取/释放锁 | 无锁,仅内存读取 |
-| **写操作** | CAS + 可能阻塞 | CAS + 可能阻塞 | CAS + 可能阻塞 |
-| **相对性能** | 基准 1x | 类似 1x | **2-3x** ⚡ |
-
-**写操作频繁场景**（读写比 10:1）:
-
-| 操作类型 | ReentrantReadWriteLock | StampedLock(乐观读) |
-|---------|----------------------|-------------------|
-| **读操作** | 稳定的锁保护 | 频繁验证失败,性能下降 |
-| **推荐** | ✅ 更稳定 | ⚠️ 性能可能更差 |
-
-### 使用场景选择
-
-**选择 StampedLock**:
-- ✅ 读操作占绝对优势（> 90%）
-- ✅ 读操作非常快速（微秒级）
-- ✅ 不需要可重入特性
-- ✅ 不需要条件变量
-- ✅ 追求极致性能
-
-**选择 ReentrantReadWriteLock**:
-- ✅ 需要可重入特性
-- ✅ 需要条件变量（await/signal）
-- ✅ 需要公平性保证
-- ✅ 写操作较频繁（> 10%）
-- ✅ 代码复杂度要求低
-- ✅ 需要完整的中断支持
-
-**示例对比**:
-
-```java
-// ReentrantReadWriteLock - 适合需要可重入的场景
-public class Cache {
-    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
-
-    public void recursiveRead() {
-        lock.readLock().lock();
-        try {
-            // 可以再次获取读锁(可重入)
-            anotherRead();
-        } finally {
-            lock.readLock().unlock();
-        }
-    }
-
-    public void anotherRead() {
-        lock.readLock().lock();  // ✅ 可重入
-        try {
-            // ...
-        } finally {
-            lock.readLock().unlock();
-        }
-    }
-}
-
-// StampedLock - 适合高性能读多写少场景
 public class Point {
-    private final StampedLock lock = new StampedLock();
     private double x, y;
+    private final StampedLock sl = new StampedLock();
 
+    // 使用乐观读
     public double distanceFromOrigin() {
-        long stamp = lock.tryOptimisticRead();  // ⚡ 乐观读,极高性能
+        long stamp = sl.tryOptimisticRead();  // 获取乐观读戳记
+        System.out.println(Thread.currentThread().getName() + " - 获取乐观读戳记: " + stamp);
+
         double currentX = x;
         double currentY = y;
-        if (!lock.validate(stamp)) {
-            stamp = lock.readLock();
+
+        // 模拟读取过程中的耗时操作
+        try {
+            Thread.sleep(10);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
+        if (!sl.validate(stamp)) {  // 验证期间是否有写操作
+            System.out.println(Thread.currentThread().getName() + " - 乐观读验证失败，升级为悲观读锁");
+            // 验证失败，升级为悲观读锁
+            stamp = sl.readLock();
             try {
+                System.out.println(Thread.currentThread().getName() + " - 获取悲观读锁成功");
                 currentX = x;
                 currentY = y;
             } finally {
-                lock.unlockRead(stamp);
+                sl.unlockRead(stamp);
+                System.out.println(Thread.currentThread().getName() + " - 释放悲观读锁");
             }
+        } else {
+            System.out.println(Thread.currentThread().getName() + " - 乐观读验证成功");
         }
+
         return Math.sqrt(currentX * currentX + currentY * currentY);
     }
-}
-```
 
-## 使用建议与最佳实践
-
-### 正确使用模式
-
-**1. 始终在 finally 块中释放锁**
-
-```java
-// ✅ 正确
-public void write() {
-    long stamp = lock.writeLock();
-    try {
-        // 写操作
-    } finally {
-        lock.unlockWrite(stamp);
-    }
-}
-
-// ❌ 错误:未使用 finally
-public void write() {
-    long stamp = lock.writeLock();
-    // 如果这里抛出异常,锁永远不会释放
-    lock.unlockWrite(stamp);
-}
-```
-
-**2. 使用统一的 unlock() 方法**
-
-```java
-// ✅ 推荐:使用统一的 unlock()
-public void operation(boolean write) {
-    long stamp = write ? lock.writeLock() : lock.readLock();
-    try {
-        // 操作
-    } finally {
-        lock.unlock(stamp);  // 自动识别锁类型
-    }
-}
-
-// ⚠️ 也可以:使用特定的 unlock 方法
-public void operation(boolean write) {
-    long stamp = write ? lock.writeLock() : lock.readLock();
-    try {
-        // 操作
-    } finally {
-        if (write) {
-            lock.unlockWrite(stamp);
-        } else {
-            lock.unlockRead(stamp);
-        }
-    }
-}
-```
-
-**3. 检查转换结果**
-
-```java
-// ✅ 正确:检查转换是否成功
-long ws = lock.tryConvertToWriteLock(stamp);
-if (ws != 0L) {
-    stamp = ws;
-    // 使用写锁
-} else {
-    // 转换失败,处理降级路径
-    lock.unlock(stamp);
-    stamp = lock.writeLock();
-}
-
-// ❌ 错误:未检查转换结果
-stamp = lock.tryConvertToWriteLock(stamp);  // 可能返回0
-// 直接使用 stamp 可能导致问题
-```
-
-### 常见错误
-
-**错误1:在乐观读中修改数据**
-
-```java
-// ❌ 严重错误:乐观读期间修改数据
-public void badOptimisticRead() {
-    long stamp = lock.tryOptimisticRead();
-    x = 10;  // 错误!乐观读不持有锁,不能修改数据
-    if (!lock.validate(stamp)) {
-        // ...
-    }
-}
-```
-
-**错误2:尝试重入**
-
-```java
-// ❌ 错误:StampedLock 不支持重入
-public void outer() {
-    long stamp = lock.readLock();
-    try {
-        inner();  // 死锁!
-    } finally {
-        lock.unlockRead(stamp);
-    }
-}
-
-public void inner() {
-    long stamp = lock.readLock();  // 尝试再次获取锁,死锁
-    try {
-        // ...
-    } finally {
-        lock.unlockRead(stamp);
-    }
-}
-```
-
-**错误3:长时间持有锁**
-
-```java
-// ❌ 错误:在持有写锁期间执行 I/O
-public void badWrite() {
-    long stamp = lock.writeLock();
-    try {
-        updateData();
-        saveToDatabase();  // I/O 操作,持有锁时间过长
-    } finally {
-        lock.unlockWrite(stamp);
-    }
-}
-
-// ✅ 正确:缩小锁的范围
-public void goodWrite() {
-    Data data = prepareData();
-
-    long stamp = lock.writeLock();
-    try {
-        updateData(data);  // 仅在锁内更新内存数据
-    } finally {
-        lock.unlockWrite(stamp);
-    }
-
-    saveToDatabase(data);  // I/O 操作在锁外执行
-}
-```
-
-### 性能优化建议
-
-**1. 优先使用乐观读**
-
-```java
-// 对于读多写少场景,优先使用乐观读
-public Data read() {
-    long stamp = lock.tryOptimisticRead();
-    Data data = copyData();
-    if (!lock.validate(stamp)) {
-        stamp = lock.readLock();
+    // 写操作
+    public void move(double deltaX, double deltaY) {
+        long stamp = sl.writeLock();  // 获取写锁
         try {
-            data = copyData();
+            System.out.println(Thread.currentThread().getName() + " - 获取写锁，修改数据");
+            x += deltaX;
+            y += deltaY;
+            Thread.sleep(5);  // 模拟写操作耗时
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } finally {
-            lock.unlockRead(stamp);
+            sl.unlockWrite(stamp);
+            System.out.println(Thread.currentThread().getName() + " - 释放写锁");
         }
     }
-    return data;
+}
+
+// 测试代码：演示多线程场景下的乐观读升级
+public class StampedLockTest {
+    public static void main(String[] args) throws InterruptedException {
+        Point point = new Point();
+
+        // 启动多个读线程
+        for (int i = 0; i < 3; i++) {
+            new Thread(() -> {
+                double distance = point.distanceFromOrigin();
+                System.out.println(Thread.currentThread().getName() + " - 计算距离: " + distance);
+            }, "读线程-" + i).start();
+        }
+
+        // 短暂延迟后启动写线程，确保写操作在读操作验证期间发生
+        Thread.sleep(5);
+        new Thread(() -> {
+            point.move(1.0, 2.0);
+        }, "写线程").start();
+
+        Thread.sleep(100);  // 等待所有线程完成
+    }
 }
 ```
 
-**2. 避免在锁内执行耗时操作**
+**输出示例**（可能的执行结果）：
+
+```
+读线程-0 - 获取乐观读戳记: 256
+读线程-1 - 获取乐观读戳记: 256
+读线程-2 - 获取乐观读戳记: 256
+写线程 - 获取写锁，修改数据
+写线程 - 释放写锁
+读线程-0 - 乐观读验证失败，升级为悲观读锁
+读线程-0 - 获取悲观读锁成功
+读线程-1 - 乐观读验证失败，升级为悲观读锁
+读线程-2 - 乐观读验证失败，升级为悲观读锁
+读线程-0 - 释放悲观读锁
+读线程-0 - 计算距离: 2.23606797749979
+读线程-1 - 获取悲观读锁成功
+读线程-1 - 释放悲观读锁
+读线程-1 - 计算距离: 2.23606797749979
+读线程-2 - 获取悲观读锁成功
+读线程-2 - 释放悲观读锁
+读线程-2 - 计算距离: 2.23606797749979
+```
+
+从输出可以看到：
+1. 三个读线程几乎同时获取了相同的乐观读戳记（256）
+2. 写线程在读线程验证之前获取写锁并修改了数据
+3. 所有读线程的乐观读验证都失败，自动升级为悲观读锁
+4. 悲观读锁是共享的，所以多个读线程可以并发持有
+
+### 锁转换示例
+
+StampedLock 支持锁模式之间的转换，可以根据实际需求灵活调整：
 
 ```java
-// ✅ 好的做法:在锁外进行计算
-public Result compute() {
-    long stamp = lock.tryOptimisticRead();
-    Data data = copyData();
-    if (!lock.validate(stamp)) {
-        stamp = lock.readLock();
+public class DataProcessor {
+    private int data;
+    private final StampedLock sl = new StampedLock();
+
+    public void conditionalUpdate(int newValue) {
+        long stamp = sl.readLock();  // 先获取读锁
         try {
-            data = copyData();
+            while (data < 100) {
+                // 尝试将读锁转换为写锁
+                long ws = sl.tryConvertToWriteLock(stamp);
+                if (ws != 0L) {  // 转换成功
+                    stamp = ws;
+                    data = newValue;
+                    break;
+                } else {  // 转换失败，释放读锁并获取写锁
+                    sl.unlockRead(stamp);
+                    stamp = sl.writeLock();
+                }
+            }
         } finally {
-            lock.unlockRead(stamp);
+            sl.unlock(stamp);  // 统一释放锁
         }
     }
-    return expensiveComputation(data);  // 锁外计算
 }
 ```
 
-**3. 使用锁降级减少写锁持有时间**
+## 为什么不能取代 ReentrantReadWriteLock
+
+尽管 StampedLock 在某些场景下性能更优，但它存在一些重要限制，使其无法完全取代 `ReentrantReadWriteLock`：
+
+### 1. 不支持重入
+
+StampedLock 的所有锁模式都**不支持重入**，这是最大的限制之一：
 
 ```java
-public Data update() {
-    long stamp = lock.writeLock();
-    try {
-        updateState();  // 写操作
+StampedLock sl = new StampedLock();
 
-        // 降级为读锁
-        stamp = lock.tryConvertToReadLock(stamp);
-
-        return computeResult();  // 读操作,允许并发
-    } finally {
-        lock.unlock(stamp);
-    }
+long stamp = sl.writeLock();
+try {
+    // 同一线程再次获取写锁会导致死锁
+    long stamp2 = sl.writeLock();  // ❌ 死锁！
+} finally {
+    sl.unlockWrite(stamp);
 }
 ```
 
-## 总结
+而 `ReentrantReadWriteLock` 支持锁的重入，同一线程可以多次获取同一把锁：
 
-### 核心特性
+```java
+ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
+rwl.writeLock().lock();
+rwl.writeLock().lock();  // ✅ 可以重入
+rwl.writeLock().unlock();
+rwl.writeLock().unlock();
+```
 
-1. **乐观读**:StampedLock 的最大特性,通过版本验证实现无锁读取
-2. **三种模式**:写锁(独占)、悲观读锁(共享)、乐观读(无锁)
-3. **锁转换**:支持在不同锁模式之间转换,避免死锁
-4. **高性能**:在读多写少场景下性能优于 ReentrantReadWriteLock
+### 2. 不支持条件变量
 
-### 关键限制
+StampedLock **不支持条件变量（Condition）**，这在需要线程间协调时会成为限制：
 
-1. **不可重入**:同一线程不能重复获取锁
-2. **无条件变量**:不支持 Condition 的 await/signal
-3. **非公平**:不支持公平锁模式
-4. **使用复杂**:相比 ReentrantReadWriteLock 代码更复杂
+```java
+// ReentrantReadWriteLock 支持条件变量
+ReentrantReadWriteLock rwl = new ReentrantReadWriteLock();
+Condition condition = rwl.writeLock().newCondition();  // ✅ 支持
 
-### 适用场景
+// StampedLock 不支持条件变量
+StampedLock sl = new StampedLock();
+// 没有 newCondition() 方法  // ❌ 不支持
+```
 
-**最适合**:
-- 读操作占比 > 90%
-- 读操作非常快速(微秒级)
-- 共享数据结构简单(少量字段)
-- 追求极致性能
+如果你的场景需要使用条件变量进行线程协调（如生产者-消费者模式），必须使用 `ReentrantReadWriteLock` 或其他支持条件变量的锁。
 
-**不适合**:
-- 需要可重入
-- 需要条件变量
-- 写操作频繁(> 10%)
-- 对代码复杂度敏感
+### 3. 使用复杂，容易出错
 
-### 与 ReentrantReadWriteLock 的选择
+StampedLock 的 API 设计与传统锁不同，需要**手动管理戳记（stamp）**，使用不当容易导致死锁或其他问题：
 
-| 场景 | 推荐 |
-|------|------|
-| 读多写少(>100:1),追求性能 | StampedLock |
-| 需要可重入 | ReentrantReadWriteLock |
-| 需要条件变量 | ReentrantReadWriteLock |
-| 写操作较多(>10%) | ReentrantReadWriteLock |
-| 代码简洁性优先 | ReentrantReadWriteLock |
-| 需要公平性 | ReentrantReadWriteLock |
+```java
+// 错误示例：使用错误的 unlock 方法
+long stamp = sl.writeLock();
+try {
+    // ...
+} finally {
+    sl.unlockRead(stamp);  // ❌ 错误！应该使用 unlockWrite
+}
 
-:::tip 使用建议
-StampedLock 是一个强大但复杂的工具。在决定使用前,应该:
-1. 通过性能测试验证是否真的需要它
-2. 确保团队成员理解其使用方式和限制
-3. 优先在性能瓶颈处使用,而不是盲目替换所有锁
-4. 考虑使用更高层的并发工具(如 ConcurrentHashMap)是否能满足需求
-:::
+// 错误示例：忘记验证乐观读
+long stamp = sl.tryOptimisticRead();
+double x = this.x;
+// ❌ 忘记调用 validate(stamp)，可能读取到不一致的数据
+return x;
+```
+
+相比之下，`ReentrantReadWriteLock` 的 API 更符合传统习惯，不容易出错。
+
+### 4. CPU 占用问题
+
+StampedLock 在获取锁时会使用**自旋（spin）**优化，在竞争激烈的情况下可能导致 CPU 占用过高：
+
+```java
+// writeLock() 会自旋等待，消耗 CPU
+long stamp = sl.writeLock();  // 可能导致 CPU 占用飙升
+```
+
+如果锁持有时间较长或竞争激烈，`ReentrantReadWriteLock` 的阻塞等待机制可能更合适。
+
+## 使用建议
+
+### 适合使用 StampedLock 的场景
+
+- **读操作远多于写操作**（如缓存、配置读取）
+- **读操作耗时很短**（避免乐观读频繁失败）
+- **不需要锁重入**
+- **不需要条件变量**
+- 追求极致的读性能
+
+### 适合使用 ReentrantReadWriteLock 的场景
+
+- 需要**锁重入**功能
+- 需要**条件变量**进行线程协调
+- 代码逻辑复杂，需要更安全的 API
+- 锁持有时间较长
+- 读写操作比例接近
+
