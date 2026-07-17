@@ -1,4 +1,6 @@
 ---
+# Frontmatter（YAML）写法
+# https://vitepress.dev/reference/default-theme-home-page
 layout: home
 
 hero:
@@ -12,7 +14,10 @@ hero:
     - theme: brand
       text: Java
       link: /java/start
----
 
-<ScrollIndicator />
-<HomeLayout />
+features:
+  - icon: 
+      src: /images/devicon--java.svg
+    title: JAVA
+    details: JUC
+---
