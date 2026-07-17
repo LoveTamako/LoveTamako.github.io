@@ -10,8 +10,16 @@ hero:
     alt: tamako
   actions:
     - theme: brand
-      text: Java
-      link: /java/start
+      text: 笔记
+      link: /notes/
+
+    - theme: alt
+      text: 文章
+      link: /article/
+
+    - theme: alt
+      text: 随笔
+      link: /essay/
 ---
 
 <ScrollIndicator />
