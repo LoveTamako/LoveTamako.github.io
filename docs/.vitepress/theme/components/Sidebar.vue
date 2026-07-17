@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import TagCloud from './TagCloud.vue'
 import CalendarHeatmap from './CalendarHeatmap.vue'
 import type { Post } from '../utils/posts.data'
+import '../styles/sidebar-item.css'
 
 const props = defineProps<{
   posts: Post[]
@@ -66,7 +67,8 @@ const tagStats = computed(() => {
       <div class="social-links">
         <a href="https://github.com" target="_blank" rel="noopener noreferrer" class="social-link" aria-label="GitHub">
           <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
-            <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
+            <path
+              d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.17 6.839 9.49.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.167 22 16.418 22 12c0-5.523-4.477-10-10-10z" />
           </svg>
         </a>
       </div>
@@ -76,31 +78,16 @@ const tagStats = computed(() => {
     <div class="navigation-card">
       <!-- Tab 导航 -->
       <div class="nav-tabs" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="activeTab === 'category'"
-          :class="{ active: activeTab === 'category' }"
-          @click="activeTab = 'category'"
-        >
+        <button type="button" role="tab" :aria-selected="activeTab === 'category'"
+          :class="{ active: activeTab === 'category' }" @click="activeTab = 'category'">
           分类
         </button>
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="activeTab === 'tag'"
-          :class="{ active: activeTab === 'tag' }"
-          @click="activeTab = 'tag'"
-        >
+        <button type="button" role="tab" :aria-selected="activeTab === 'tag'" :class="{ active: activeTab === 'tag' }"
+          @click="activeTab = 'tag'">
           标签
         </button>
-        <button
-          type="button"
-          role="tab"
-          :aria-selected="activeTab === 'archive'"
-          :class="{ active: activeTab === 'archive' }"
-          @click="activeTab = 'archive'"
-        >
+        <button type="button" role="tab" :aria-selected="activeTab === 'archive'"
+          :class="{ active: activeTab === 'archive' }" @click="activeTab = 'archive'">
           归档
         </button>
       </div>
@@ -109,34 +96,22 @@ const tagStats = computed(() => {
       <div class="tab-content">
         <!-- 分类面板 -->
         <div v-if="activeTab === 'category'" class="category-panel">
-          <button
-            v-for="cat in categoryStats"
-            :key="cat.type"
-            type="button"
-            :class="{ active: selectedCategory === cat.type }"
-            class="category-item"
-            @click="emit('selectCategory', cat.type)"
-          >
-            <span class="category-label">{{ cat.label }}</span>
-            <span class="category-count">{{ cat.count }}</span>
+          <button v-for="cat in categoryStats" :key="cat.type" type="button"
+            :class="{ active: selectedCategory === cat.type }" class="sidebar-list-item"
+            @click="emit('selectCategory', cat.type)">
+            <span class="sidebar-item-label">{{ cat.label }}</span>
+            <span class="sidebar-item-count">{{ cat.count }}</span>
           </button>
         </div>
 
         <!-- 标签面板 -->
         <div v-if="activeTab === 'tag'" class="tag-panel">
-          <TagCloud
-            :tags="tagStats"
-            :selected-tag="selectedTag"
-            @select="emit('selectTag', $event)"
-          />
+          <TagCloud :tags="tagStats" :selected-tag="selectedTag" @select="emit('selectTag', $event)" />
         </div>
 
         <!-- 归档面板 -->
         <div v-if="activeTab === 'archive'" class="archive-panel">
-          <CalendarHeatmap
-            :posts="posts"
-            @select-date="emit('selectDate', $event)"
-          />
+          <CalendarHeatmap :posts="posts" :selected-date="selectedDate" @select-date="emit('selectDate', $event)" />
         </div>
       </div>
     </div>
@@ -293,79 +268,6 @@ const tagStats = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-}
-
-.category-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 0.625rem 0.875rem;
-  background: transparent;
-  border: none;
-  border-left: 3px solid transparent;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.25s ease;
-  text-align: left;
-  width: 100%;
-  min-height: 38px;
-}
-
-.category-item:hover {
-  background: var(--vp-c-bg-soft);
-  transform: translateX(3px);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-.dark .category-item:hover {
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-}
-
-.category-item.active {
-  background: var(--vp-c-brand-soft);
-  border-left-color: var(--vp-c-brand-1);
-  transform: translateX(2px);
-}
-
-.category-label {
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--vp-c-text-2);
-  transition: color 0.2s ease;
-}
-
-.category-item:hover .category-label {
-  color: var(--vp-c-text-1);
-}
-
-.category-item.active .category-label {
-  color: var(--vp-c-brand-1);
-  font-weight: 600;
-}
-
-.category-count {
-  font-size: 0.75rem;
-  color: var(--vp-c-text-3);
-  padding: 0.2rem 0.5rem;
-  background: var(--vp-c-bg-soft);
-  border: 1px solid var(--vp-c-divider);
-  border-radius: 12px;
-  min-width: 22px;
-  text-align: center;
-  font-weight: 500;
-  transition: all 0.2s ease;
-}
-
-.category-item:hover .category-count {
-  border-color: var(--vp-c-brand-1);
-  background: var(--vp-c-bg);
-}
-
-.category-item.active .category-count {
-  background: var(--vp-c-brand-1);
-  color: #ffffff;
-  border-color: var(--vp-c-brand-1);
-  font-weight: 600;
 }
 
 /* 标签和归档面板 */

@@ -81,15 +81,9 @@ const getTagSize = (count: number) => {
 }
 
 .tag-item:hover {
-  color: var(--vp-c-brand-1);
-  border-color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-1);
   background: var(--vp-c-bg-soft);
   transform: translateY(-1px);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
-}
-
-.dark .tag-item:hover {
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 .tag-item:focus-visible {
@@ -100,17 +94,22 @@ const getTagSize = (count: number) => {
 .tag-item.active {
   color: var(--vp-c-brand-1);
   background: var(--vp-c-brand-soft);
-  border-color: var(--vp-c-brand-1);
+  border-color: transparent;
   font-weight: 600;
 }
 
 .count {
   font-size: 0.7em;
-  opacity: 0.55;
+  color: var(--vp-c-text-3);
   margin-left: 0.2rem;
+  transition: color 0.2s ease;
+}
+
+.tag-item:hover .count {
+  color: var(--vp-c-text-2);
 }
 
 .tag-item.active .count {
-  opacity: 0.75;
+  color: var(--vp-c-brand-1);
 }
 </style>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
+import '../styles/sidebar-item.css'
 
 interface Post {
   date: string
@@ -7,140 +8,213 @@ interface Post {
 
 const props = defineProps<{
   posts: Post[]
+  selectedDate?: string
 }>()
 
 const emit = defineEmits<{
   selectDate: [date: string]
 }>()
 
-// 按月份统计文章数量
-const monthlyStats = computed(() => {
+const showAllYears = ref(false)
+
+const archiveByYear = computed(() => {
   const stats = new Map<string, number>()
 
   props.posts.forEach(post => {
     const date = new Date(post.date)
-    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
+    const year = date.getFullYear()
+    const month = date.getMonth() + 1
+
+    const key = `${year}-${String(month).padStart(2, '0')}`
     stats.set(key, (stats.get(key) || 0) + 1)
   })
 
-  // 获取最近12个月
-  const months: { key: string; label: string; count: number }[] = []
-  const now = new Date()
+  const yearMap = new Map<number, Array<{
+    key: string
+    label: string
+    count: number
+  }>>()
 
-  for (let i = 11; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
-    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-    const label = `${d.getFullYear()}年${d.getMonth() + 1}月`
-    const count = stats.get(key) || 0
-    months.push({ key, label, count })
-  }
+  stats.forEach((count, key) => {
+    const [yearStr, monthStr] = key.split('-')
+    const year = Number(yearStr)
+    const month = Number(monthStr)
 
-  return months
+    if (!yearMap.has(year)) {
+      yearMap.set(year, [])
+    }
+
+    yearMap.get(year)!.push({
+      key,
+      label: `${String(month).padStart(2, '0')}月`,
+      count
+    })
+  })
+
+  return Array.from(yearMap.entries())
+    .map(([year, months]) => ({
+      year,
+      months: months.sort((a, b) =>
+        b.key.localeCompare(a.key)
+      )
+    }))
+    .sort((a, b) => b.year - a.year)
 })
 
-const maxCount = computed(() => {
-  return Math.max(...monthlyStats.value.map(m => m.count), 1)
+
+const displayedYears = computed(() => {
+  return showAllYears.value
+    ? archiveByYear.value
+    : archiveByYear.value.slice(0, 3)
 })
 
-const getIntensity = (count: number) => {
-  if (count === 0) return 0
-  const ratio = count / maxCount.value
-  if (ratio > 0.75) return 4
-  if (ratio > 0.5) return 3
-  if (ratio > 0.25) return 2
-  return 1
-}
+const hasMoreYears = computed(() => {
+  return archiveByYear.value.length > 3
+})
 </script>
 
+
 <template>
-  <div class="calendar-heatmap">
-    <h3 class="section-title">发布日历</h3>
-    <div class="months-grid">
-      <div
-        v-for="month in monthlyStats"
-        :key="month.key"
-        class="month-cell"
-        :class="`intensity-${getIntensity(month.count)}`"
-        :title="`${month.label}: ${month.count}篇`"
-        @click="emit('selectDate', month.key)"
-      >
-        <div class="month-label">{{ month.label.slice(5) }}</div>
-        <div class="month-count">{{ month.count }}</div>
+  <div class="archive-list">
+
+    <div v-for="yearData in displayedYears" :key="yearData.year" class="year-group">
+
+      <h4 class="year-header">
+        {{ yearData.year }}
+      </h4>
+
+
+      <div class="month-list">
+
+        <button v-for="month in yearData.months" :key="month.key" type="button" class="sidebar-list-item" :class="{
+          active: selectedDate === month.key
+        }" @click="emit('selectDate', month.key)">
+
+          <span class="sidebar-item-label">
+            {{ month.label }}
+          </span>
+
+          <span class="sidebar-item-count">
+            {{ month.count }}
+          </span>
+
+        </button>
+
       </div>
+
     </div>
+
+
+    <button v-if="hasMoreYears && !showAllYears" type="button" class="view-more-btn" @click="showAllYears = true">
+      查看更多归档
+    </button>
+
   </div>
 </template>
 
+
 <style scoped>
-.calendar-heatmap {
-  padding: 1.25rem;
-  background: var(--vp-c-bg-soft);
-  border-radius: 8px;
-  margin-bottom: 1.5rem;
+.archive-list {
+  padding: 0;
 }
 
-.section-title {
-  margin: 0 0 1rem 0;
-  font-size: 1.125rem;
+
+/* 年份 */
+
+.year-group {
+  margin-bottom: 1.25rem;
+}
+
+.year-group:last-child {
+  margin-bottom: 0;
+}
+
+
+.year-header {
+  margin: 0 0 0.5rem 0;
+  padding: 0 0.875rem;
+
+  font-size: 0.875rem;
   font-weight: 600;
-  color: var(--vp-c-text-1);
-}
 
-.months-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.5rem;
-}
-
-.month-cell {
-  padding: 0.75rem;
-  background: var(--vp-c-default-soft);
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-  text-align: center;
-}
-
-.month-cell:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-}
-
-.month-label {
-  font-size: 0.813rem;
   color: var(--vp-c-text-2);
-  margin-bottom: 0.25rem;
+  letter-spacing: 0.02em;
 }
 
-.month-count {
-  font-size: 1.25rem;
-  font-weight: 600;
-  color: var(--vp-c-text-1);
+
+
+/* 月份列表 */
+
+.month-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
-.intensity-0 {
-  opacity: 0.3;
+
+/* 查看更多 */
+
+.view-more-btn {
+
+  width: 100%;
+
+
+  margin-top: 0.75rem;
+
+
+  padding: 0.5rem 0.875rem;
+
+
+  background: transparent;
+
+
+  border: 1px solid var(--vp-c-divider);
+
+
+  border-radius: 6px;
+
+
+  color: var(--vp-c-text-2);
+
+
+  font-size: 0.8125rem;
+
+
+  font-weight: 500;
+
+
+  cursor: pointer;
+
+
+  transition: all 0.2s ease;
+
+
+  font-family: inherit;
+
 }
 
-.intensity-1 {
-  background: rgba(var(--vp-c-brand-rgb), 0.2);
+
+
+.view-more-btn:hover {
+
+  color: var(--vp-c-brand-1);
+
+
+  border-color: var(--vp-c-brand-1);
+
+
+  background: var(--vp-c-bg-soft);
+
 }
 
-.intensity-2 {
-  background: rgba(var(--vp-c-brand-rgb), 0.4);
-}
 
-.intensity-3 {
-  background: rgba(var(--vp-c-brand-rgb), 0.6);
-}
 
-.intensity-4 {
-  background: rgba(var(--vp-c-brand-rgb), 0.8);
-}
+.view-more-btn:focus-visible {
 
-@media (max-width: 768px) {
-  .months-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
+  outline: 2px solid var(--vp-c-brand-1);
+
+
+  outline-offset: 2px;
+
 }
 </style>
