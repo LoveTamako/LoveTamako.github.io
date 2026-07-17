@@ -63,53 +63,120 @@ const getTagSize = (count: number) => {
   align-items: center;
 }
 
+
 .tag-item {
   padding: 0.3rem 0.65rem;
+
   background: transparent;
+
   border: 1px solid transparent;
+
   border-radius: 999px;
+
   color: var(--vp-c-text-2);
+
   cursor: pointer;
+
   transition: all 0.2s ease;
+
   white-space: nowrap;
+
   font-weight: 500;
+
   font-family: inherit;
+
   line-height: 1.4;
+
   appearance: none;
+
   -webkit-appearance: none;
+
   -moz-appearance: none;
 }
 
+
+
+/* hover */
+
 .tag-item:hover {
-  color: var(--vp-c-text-1);
+
+  color: var(--vp-c-brand-1);
+
+  border-color: var(--vp-c-brand-1);
+
   background: var(--vp-c-bg-soft);
+
   transform: translateY(-1px);
+
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+
 }
+
+
+.dark .tag-item:hover {
+
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+
+}
+
+
+
+/* focus */
 
 .tag-item:focus-visible {
+
   outline: 2px solid var(--vp-c-brand-1);
+
   outline-offset: 2px;
+
 }
+
+
+
+/* active */
 
 .tag-item.active {
+
   color: var(--vp-c-brand-1);
+
   background: var(--vp-c-brand-soft);
-  border-color: transparent;
+
+  border-color: var(--vp-c-brand-1);
+
   font-weight: 600;
+
 }
+
+
+
+/* count */
 
 .count {
+
   font-size: 0.7em;
-  color: var(--vp-c-text-3);
+
+  opacity: 0.55;
+
   margin-left: 0.2rem;
-  transition: color 0.2s ease;
+
+  transition: all 0.2s ease;
+
 }
+
 
 .tag-item:hover .count {
-  color: var(--vp-c-text-2);
+
+  opacity: 0.75;
+
 }
 
+
 .tag-item.active .count {
+
+  opacity: 0.85;
+
   color: var(--vp-c-brand-1);
+
 }
+
 </style>
