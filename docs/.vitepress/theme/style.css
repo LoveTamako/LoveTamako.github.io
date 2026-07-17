@@ -68,8 +68,8 @@
 }
 
 html {
-  scroll-behavior: auto;
-  scroll-snap-type: y proximity;
+  scroll-behavior: smooth;
+  scroll-snap-type: y mandatory;
 }
 
 body {
@@ -540,6 +540,7 @@ body {
 
 /* Activity Timeline 滚动偏移与 Snap */
 #activity-timeline {
-  scroll-margin-top: calc(var(--vp-nav-height) + 2rem);
   scroll-snap-align: start;
+  min-height: 100vh;
+  padding-top: calc(var(--vp-nav-height) + 2rem);
 }

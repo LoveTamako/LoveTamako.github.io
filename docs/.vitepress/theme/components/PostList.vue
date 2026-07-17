@@ -6,61 +6,60 @@ defineProps<{
 }>()
 
 const typeConfig = {
-  notes: { label: '笔记', color: '#3b82f6' },
-  article: { label: '文章', color: '#10b981' },
-  essay: { label: '随笔', color: '#f59e0b' }
+  notes: '笔记',
+  article: '文章',
+  essay: '随笔'
 }
 
 const formatDate = (date: string) => {
-  return new Date(date).toLocaleDateString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  })
+  const d = new Date(date)
+  const year = d.getFullYear()
+  const month = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
 }
 </script>
 
 <template>
-  <div class="post-list">
+  <div class="timeline">
     <div v-if="posts.length === 0" class="empty-state">
       <p>暂无内容</p>
     </div>
 
-    <article v-for="post in posts" :key="post.url" class="post-item">
-      <a :href="post.url" class="post-link">
-        <div class="post-header">
-          <div class="post-meta">
-            <time class="post-date">{{ formatDate(post.date) }}</time>
-            <span
-              class="post-type"
-              :style="{
-                backgroundColor: typeConfig[post.type]?.color || '#6b7280',
-                color: 'white'
-              }"
-            >
-              {{ typeConfig[post.type]?.label || '未分类' }}
+    <article v-for="post in posts" :key="post.url" class="timeline-item">
+      <time class="timeline-date">{{ formatDate(post.date) }}</time>
+
+      <div class="timeline-marker"></div>
+
+      <div class="timeline-content">
+        <a :href="post.url" class="content-link">
+          <h2 class="content-title">
+            <span class="content-type">[{{ typeConfig[post.type] || '未分类' }}]</span>
+            {{ post.title }}
+          </h2>
+
+          <p v-if="post.description" class="content-description">
+            {{ post.description }}
+          </p>
+
+          <div v-if="post.tags?.length" class="content-tags">
+            <span v-for="(tag, index) in post.tags" :key="tag">
+              {{ tag }}<span v-if="index < post.tags.length - 1" class="tag-separator"> · </span>
             </span>
           </div>
-          <h2 class="post-title">{{ post.title }}</h2>
-        </div>
-
-        <p v-if="post.description" class="post-description">
-          {{ post.description }}
-        </p>
-
-        <div v-if="post.tags?.length" class="post-tags">
-          <span v-for="tag in post.tags" :key="tag" class="tag">
-            #{{ tag }}
-          </span>
-        </div>
-      </a>
+        </a>
+      </div>
     </article>
   </div>
 </template>
 
 <style scoped>
-.post-list {
+.timeline {
   width: 100%;
+  position: relative;
+  --date-width: 110px;
+  --marker-width: 16px;
+  --timeline-gap: 1.5rem;
 }
 
 .empty-state {
@@ -69,76 +68,146 @@ const formatDate = (date: string) => {
   color: var(--vp-c-text-3);
 }
 
-.post-item {
-  margin-bottom: 1.5rem;
+/* Timeline Item */
+.timeline-item {
+  display: grid;
+  grid-template-columns: var(--date-width) var(--marker-width) 1fr;
+  gap: var(--timeline-gap);
+  align-items: start;
+  padding-bottom: 1.75rem;
+  position: relative;
 }
 
-.post-link {
+.timeline-item:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: calc(var(--date-width) + var(--timeline-gap) / 2);
+  top: 1rem;
+  height: calc(100% - 1rem);
+  width: 1px;
+  background: var(--vp-c-divider);
+}
+
+/* Timeline Date */
+.timeline-date {
+  font-size: 0.875rem;
+  color: var(--vp-c-text-3);
+  white-space: nowrap;
+  padding-top: 0.125rem;
+}
+
+/* Timeline Marker */
+.timeline-marker {
+  position: relative;
+  width: 0.625rem;
+  height: 0.625rem;
+  background: var(--vp-c-text-3);
+  border: 2px solid var(--vp-c-bg);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--vp-c-divider);
+  transition: background 0.2s ease, transform 0.2s ease;
+  margin-top: 0.5rem;
+  flex-shrink: 0;
+}
+
+.timeline-item:hover .timeline-marker {
+  background: var(--vp-c-brand-1);
+  transform: scale(1.1);
+}
+
+/* Timeline Content */
+.timeline-content {
+  min-width: 0;
+}
+
+.content-link {
   display: block;
-  padding: 1.5rem;
-  background: var(--vp-c-bg-soft);
-  border-radius: 8px;
-  border: 1px solid var(--vp-c-divider);
-  transition: all 0.3s ease;
   text-decoration: none;
   color: inherit;
 }
 
-.post-link:hover {
-  border-color: var(--vp-c-brand);
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
-  transform: translateX(4px);
+.content-link:hover .content-title {
+  color: var(--vp-c-brand-1);
 }
 
-.post-header {
-  margin-bottom: 0.75rem;
+/* Content Title and Type */
+.content-type {
+  font-size: inherit;
+  color: var(--vp-c-text-3);
+  font-weight: 400;
 }
 
-.post-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.5rem;
+.content-title {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  line-height: 1.5;
+  transition: color 0.2s ease;
 }
 
-.post-date {
+/* Content Description */
+.content-description {
+  margin: 0.5rem 0;
+  color: var(--vp-c-text-2);
+  font-size: 0.9rem;
+  line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Content Tags */
+.content-tags {
+  margin-top: 0.75rem;
   font-size: 0.875rem;
   color: var(--vp-c-text-3);
 }
 
-.post-type {
-  padding: 0.25rem 0.625rem;
-  border-radius: 12px;
-  font-size: 0.813rem;
-  font-weight: 500;
+.tag-separator {
+  color: var(--vp-c-divider);
 }
 
-.post-title {
-  margin: 0;
-  font-size: 1.375rem;
-  font-weight: 600;
-  color: var(--vp-c-text-1);
-  line-height: 1.4;
-}
+/* Responsive */
+@media (max-width: 768px) {
+  .timeline {
+    --marker-width: 12px;
+    --timeline-gap: 0.75rem;
+  }
 
-.post-description {
-  margin: 0 0 0.75rem 0;
-  color: var(--vp-c-text-2);
-  font-size: 0.95rem;
-  line-height: 1.6;
-}
+  .timeline-item {
+    grid-template-columns: var(--marker-width) 1fr;
+    gap: var(--timeline-gap);
+    padding-bottom: 1.5rem;
+  }
 
-.post-tags {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
+  .timeline-item:not(:last-child)::before {
+    left: calc(var(--marker-width) / 2);
+  }
 
-.tag {
-  padding: 0.25rem 0.5rem;
-  background: var(--vp-c-default-soft);
-  border-radius: 4px;
-  font-size: 0.813rem;
-  color: var(--vp-c-text-2);
+  .timeline-date {
+    grid-column: 1 / -1;
+    padding-top: 0;
+    margin-bottom: 0.25rem;
+  }
+
+  .timeline-marker {
+    margin-top: 0.375rem;
+    width: 0.375rem;
+    height: 0.375rem;
+  }
+
+  .content-title {
+    font-size: 1rem;
+  }
+
+  .content-description {
+    font-size: 0.875rem;
+  }
+
+  .content-tags {
+    font-size: 0.813rem;
+  }
 }
 </style>
