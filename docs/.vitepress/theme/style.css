@@ -69,7 +69,7 @@
 
 html {
   scroll-behavior: smooth;
-  scroll-snap-type: y mandatory;
+  scroll-snap-type: y proximity;
 }
 
 body {
@@ -138,6 +138,7 @@ body {
 .VPHome .VPHero {
   min-height: 100vh;
   scroll-snap-align: start;
+  scroll-snap-stop: always;
 }
 
 .VPHome .VPHero .container {
@@ -541,6 +542,7 @@ body {
 /* Activity Timeline 滚动偏移与 Snap */
 #activity-timeline {
   scroll-snap-align: start;
+  scroll-snap-stop: always;
   min-height: 100vh;
   padding-top: calc(var(--vp-nav-height) + 2rem);
 }

@@ -23,7 +23,7 @@ const formatDate = (date: string) => {
 <template>
   <div class="timeline">
     <div v-if="posts.length === 0" class="empty-state">
-      <p>暂无内容</p>
+      <p>没有找到匹配内容</p>
     </div>
 
     <article v-for="post in posts" :key="post.url" class="timeline-item">
