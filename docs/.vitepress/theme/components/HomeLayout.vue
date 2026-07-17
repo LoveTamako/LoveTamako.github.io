@@ -1,19 +1,18 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import type { Post } from '../utils/posts.data'
-import { data as posts } from '../utils/posts.data'
+import { data as allPosts } from '../utils/posts.data'
 import Sidebar from './Sidebar.vue'
 import PostList from './PostList.vue'
 
 const selectedTag = ref<string>()
 const selectedDate = ref<string>()
-const selectedCategory = ref<string>()
 
-// 筛选匹配函数
-const matchCategory = (post: Post) => {
-  if (!selectedCategory.value) return true
-  return post.type === selectedCategory.value
-}
+const posts = computed(() => {
+  return allPosts.filter(
+    post => post.type === 'article' || post.type === 'essay'
+  )
+})
 
 const matchTag = (post: Post) => {
   if (!selectedTag.value) return true
@@ -29,23 +28,14 @@ const matchDate = (post: Post) => {
 
 // 筛选后的文章
 const filteredPosts = computed(() => {
-  return posts.filter(post => {
-    return matchCategory(post) && matchTag(post) && matchDate(post)
+  return posts.value.filter(post => {
+    return matchTag(post) && matchDate(post)
   })
 })
 
 // 当前筛选状态（用于 UI 展示）
 const activeFilterLabels = computed(() => {
   const filters: string[] = []
-
-  if (selectedCategory.value) {
-    const categoryLabels = {
-      notes: '技术笔记',
-      article: '技术文章',
-      essay: '随笔'
-    }
-    filters.push(categoryLabels[selectedCategory.value as keyof typeof categoryLabels] || selectedCategory.value)
-  }
 
   if (selectedTag.value) {
     filters.push(selectedTag.value)
@@ -57,7 +47,6 @@ const activeFilterLabels = computed(() => {
 
   return filters
 })
-
 const handleTagSelect = (tag: string) => {
   selectedTag.value = selectedTag.value === tag ? undefined : tag
 }
@@ -66,9 +55,6 @@ const handleDateSelect = (date: string) => {
   selectedDate.value = selectedDate.value === date ? undefined : date
 }
 
-const handleCategorySelect = (category: string) => {
-  selectedCategory.value = selectedCategory.value === category ? undefined : category
-}
 </script>
 
 <template>
@@ -86,15 +72,8 @@ const handleCategorySelect = (category: string) => {
       </main>
 
       <aside class="sidebar-wrapper">
-        <Sidebar
-          :posts="posts"
-          :selected-category="selectedCategory"
-          :selected-tag="selectedTag"
-          :selected-date="selectedDate"
-          @select-category="handleCategorySelect"
-          @select-tag="handleTagSelect"
-          @select-date="handleDateSelect"
-        />
+        <Sidebar :posts="posts" :selected-tag="selectedTag" :selected-date="selectedDate" @select-tag="handleTagSelect"
+          @select-date="handleDateSelect" />
       </aside>
     </div>
   </section>

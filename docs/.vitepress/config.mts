@@ -33,22 +33,14 @@ export default defineConfig({
     },
     // https://vitepress.dev/reference/default-theme-config
     nav: [
-      { text: '首页', link: '/' },
+      {
+        text: '首页',
+        link: '/'
+      },
       {
         text: '笔记',
-        items: [
-          {
-            text: '笔记总览',
-            link: '/notes/'
-          },
-          {
-            text: 'Java',
-            link: '/notes/java/start'
-          }
-        ]
-      },
-      { text: '文章', link: '/article/' },
-      { text: '随笔', link: '/essay/' }
+        link: '/notes/'
+      }
     ],
 
     sidebar: {

@@ -7,41 +7,19 @@ import '../styles/sidebar-item.css'
 
 const props = defineProps<{
   posts: Post[]
-  selectedCategory?: string
   selectedTag?: string
   selectedDate?: string
 }>()
 
 const emit = defineEmits<{
-  selectCategory: [category: string]
   selectTag: [tag: string]
   selectDate: [date: string]
 }>()
 
 // Tab 状态管理
-type TabType = 'category' | 'tag' | 'archive'
-const activeTab = ref<TabType>('category')
+type TabType = 'tag' | 'archive'
 
-// 计算分类统计
-const categoryStats = computed(() => {
-  const stats = {
-    notes: 0,
-    article: 0,
-    essay: 0
-  }
-
-  props.posts.forEach(post => {
-    if (post.type in stats) {
-      stats[post.type]++
-    }
-  })
-
-  return [
-    { type: 'notes', label: '笔记', count: stats.notes },
-    { type: 'article', label: '文章', count: stats.article },
-    { type: 'essay', label: '随笔', count: stats.essay }
-  ]
-})
+const activeTab = ref<TabType>('tag')
 
 // 计算标签统计
 const tagStats = computed(() => {
@@ -78,10 +56,6 @@ const tagStats = computed(() => {
     <div class="navigation-card">
       <!-- Tab 导航 -->
       <div class="nav-tabs" role="tablist">
-        <button type="button" role="tab" :aria-selected="activeTab === 'category'"
-          :class="{ active: activeTab === 'category' }" @click="activeTab = 'category'">
-          分类
-        </button>
         <button type="button" role="tab" :aria-selected="activeTab === 'tag'" :class="{ active: activeTab === 'tag' }"
           @click="activeTab = 'tag'">
           标签
@@ -94,16 +68,6 @@ const tagStats = computed(() => {
 
       <!-- Tab 内容 -->
       <div class="tab-content">
-        <!-- 分类面板 -->
-        <div v-if="activeTab === 'category'" class="category-panel">
-          <button v-for="cat in categoryStats" :key="cat.type" type="button"
-            :class="{ active: selectedCategory === cat.type }" class="sidebar-list-item"
-            @click="emit('selectCategory', cat.type)">
-            <span class="sidebar-item-label">{{ cat.label }}</span>
-            <span class="sidebar-item-count">{{ cat.count }}</span>
-          </button>
-        </div>
-
         <!-- 标签面板 -->
         <div v-if="activeTab === 'tag'" class="tag-panel">
           <TagCloud :tags="tagStats" :selected-tag="selectedTag" @select="emit('selectTag', $event)" />
@@ -261,13 +225,6 @@ const tagStats = computed(() => {
 .tab-content {
   padding: 1.25rem;
   min-height: 200px;
-}
-
-/* 分类面板 */
-.category-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
 }
 
 /* 标签和归档面板 */
