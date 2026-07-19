@@ -9,7 +9,9 @@ const selectedTag = ref<string>()
 const selectedDate = ref<string>()
 
 const posts = computed(() => {
-  return allPosts
+  return allPosts.filter(
+    post => post.type === 'post'
+  )
 })
 
 const matchTag = (post: Post) => {

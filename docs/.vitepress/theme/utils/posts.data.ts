@@ -5,6 +5,7 @@ export interface Post {
   url: string
   date: string
   tags: string[]
+  type: 'note' | 'post'
   description?: string
   excerpt?: string
 }
@@ -21,10 +22,14 @@ export default createContentLoader('**/*.md', {
         url,
         date: frontmatter.date || '',
         tags: frontmatter.tags || [],
+        type: frontmatter.type || 'note',
         description: frontmatter.description || '',
         excerpt: excerpt || ''
       }))
-      .filter(post => post.date && post.url !== '/') // 过滤掉首页和没有日期的文章
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      .filter(post => post.date && post.url !== '/')
+      .sort(
+        (a, b) =>
+          new Date(b.date).getTime() - new Date(a.date).getTime()
+      )
   }
 })

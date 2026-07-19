@@ -1,7 +1,7 @@
 ---
 title: 微服务架构设计思考
 date: 2026-07-11
-type: article
+type: post
 tags: [微服务, 架构]
 description: 微服务架构的设计原则和实践经验。
 ---

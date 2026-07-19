@@ -1,7 +1,7 @@
 ---
 title: Vue 3 组合式 API 最佳实践
 date: 2026-07-15
-type: article
+type: post
 tags: [Vue, 前端, JavaScript]
 description: 探讨 Vue 3 Composition API 的使用技巧和最佳实践，帮助开发者更好地组织代码。
 ---

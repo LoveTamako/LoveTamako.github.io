@@ -1,7 +1,7 @@
 ---
 title: 关于阅读的一些感悟
 date: 2026-07-10
-type: essay
+type: post
 tags: [阅读, 思考]
 description: 记录阅读带来的思考和感悟。
 ---

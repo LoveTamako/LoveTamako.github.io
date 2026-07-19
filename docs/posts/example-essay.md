@@ -1,7 +1,7 @@
 ---
 title: 关于学习的一些思考
 date: 2026-07-10
-type: essay
+type: post
 tags: [思考, 学习]
 description: 记录最近对学习方法的一些感悟和思考。
 ---

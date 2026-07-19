@@ -1,7 +1,7 @@
 ---
 title: 前端性能优化实践
 date: 2026-07-13
-type: article
+type: post
 tags: [性能优化, 前端]
 description: 总结前端性能优化的常用技巧和最佳实践。
 ---
