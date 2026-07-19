@@ -1,6 +1,6 @@
 # 终止模式之两阶段终止
 
-在[2.4 常见方法](/java/juc/java-thread/thread-methods#two-phase-termination)章节已经介绍过使用 `interrupt()` 实现两阶段终止，本章将使用 `volatile` 改进实现。
+在[2.4 常见方法](/notes/java/juc/java-thread/thread-methods#two-phase-termination)章节已经介绍过使用 `interrupt()` 实现两阶段终止，本章将使用 `volatile` 改进实现。
 
 ## 利用 volatile 实现两阶段终止
 

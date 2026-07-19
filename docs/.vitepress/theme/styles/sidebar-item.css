@@ -1,0 +1,206 @@
+/**
+ * Sidebar Navigation Item 通用样式
+ *
+ * 用于：
+ * - 分类列表
+ * - 归档月份列表
+ * - 其他 Sidebar 导航项
+ *
+ * 保持 VitePress 风格：
+ * - 左侧 active 标识
+ * - hover 横向移动
+ * - count badge
+ * - dark mode 支持
+ */
+
+
+/* =========================
+ * 列表容器
+ * ========================= */
+
+.sidebar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+
+/* =========================
+ * 列表项基础样式
+ * ========================= */
+
+.sidebar-list-item {
+
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+
+  padding: 0.625rem 0.875rem;
+
+  background: transparent;
+
+  border: none;
+
+  /*
+   * 左侧 active 指示线
+   */
+  border-left: 3px solid transparent;
+
+  border-radius: 4px;
+
+  cursor: pointer;
+
+  transition: all 0.25s ease;
+
+  text-align: left;
+
+  width: 100%;
+
+  min-height: 38px;
+
+  font-family: inherit;
+
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+}
+
+
+/* =========================
+ * Hover 状态
+ * ========================= */
+
+.sidebar-list-item:hover {
+
+  background: var(--vp-c-bg-soft);
+
+  /*
+   * Sidebar 导航采用横向移动
+   * 而不是卡片式上下浮动
+   */
+  transform: translateX(3px);
+
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+
+.dark .sidebar-list-item:hover {
+
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+
+}
+
+
+/* =========================
+ * Active 状态
+ * ========================= */
+
+.sidebar-list-item.active {
+
+  background: var(--vp-c-brand-soft);
+
+  border-left-color: var(--vp-c-brand-1);
+
+  transform: translateX(2px);
+}
+
+
+/* =========================
+ * Focus
+ * ========================= */
+
+.sidebar-list-item:focus-visible {
+
+  outline: 2px solid var(--vp-c-brand-1);
+
+  outline-offset: 2px;
+}
+
+
+/* =========================
+ * 左侧文字
+ * ========================= */
+
+.sidebar-item-label {
+
+  font-size: 0.8125rem;
+
+  font-weight: 500;
+
+  color: var(--vp-c-text-2);
+
+  transition: color 0.2s ease;
+}
+
+
+.sidebar-list-item:hover .sidebar-item-label {
+
+  color: var(--vp-c-text-1);
+
+}
+
+
+.sidebar-list-item.active .sidebar-item-label {
+
+  color: var(--vp-c-brand-1);
+
+  font-weight: 600;
+
+}
+
+
+/* =========================
+ * 数量 Badge
+ * ========================= */
+
+.sidebar-item-count {
+
+  font-size: 0.75rem;
+
+  color: var(--vp-c-text-3);
+
+  padding: 0.2rem 0.5rem;
+
+
+  background: var(--vp-c-bg-soft);
+
+  border: 1px solid var(--vp-c-divider);
+
+
+  border-radius: 12px;
+
+
+  min-width: 22px;
+
+  text-align: center;
+
+
+  font-weight: 500;
+
+
+  transition: all 0.2s ease;
+}
+
+
+
+.sidebar-list-item:hover .sidebar-item-count {
+
+  border-color: var(--vp-c-brand-1);
+
+  background: var(--vp-c-bg);
+
+}
+
+
+
+.sidebar-list-item.active .sidebar-item-count {
+
+  background: var(--vp-c-brand-1);
+
+  color: var(--color-neutral-0);
+
+  border-color: var(--vp-c-brand-1);
+
+  font-weight: 600;
+
+}
