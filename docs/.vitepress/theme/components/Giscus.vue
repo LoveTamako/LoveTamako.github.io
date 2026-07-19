@@ -97,7 +97,7 @@ watch(
   border: 1px solid var(--vp-c-divider);
   border-radius: 16px;
   background: linear-gradient(180deg, var(--vp-c-bg-elv), var(--vp-c-bg-soft));
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.05);
+  box-shadow: var(--shadow-xl);
   overflow: hidden;
   padding: 1.5rem;
   transition: all 0.3s ease;
@@ -105,20 +105,18 @@ watch(
 
 .giscus-container > div:hover {
   border-color: rgba(192, 192, 192, 0.65);
-  box-shadow:
-    0 20px 44px rgba(0, 0, 0, 0.08),
-    0 0 0 1px rgba(229, 229, 229, 0.75);
+  box-shadow: var(--shadow-2xl), 0 0 0 1px rgba(229, 229, 229, 0.75);
   transform: translateY(-2px);
 }
 
 .dark .giscus-container > div {
   background: linear-gradient(180deg, var(--vp-c-bg-elv), rgba(255, 255, 255, 0.02));
-  box-shadow: 0 24px 50px rgba(0, 0, 0, 0.24);
+  box-shadow: var(--shadow-xl);
 }
 
 .dark .giscus-container > div:hover {
   border-color: rgba(255, 255, 255, 0.14);
-  box-shadow: 0 28px 60px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--shadow-2xl);
 }
 
 @media (max-width: 768px) {

@@ -194,6 +194,7 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
   border: 1px solid var(--vp-c-divider);
   border-radius: 12px;
   overflow: hidden;
+  box-shadow: var(--shadow-card);
   transition:
     border-color 0.25s ease,
     background-color 0.25s ease,
@@ -205,11 +206,15 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
   border-color: var(--vp-c-brand-1);
   background: var(--vp-c-bg-soft);
   transform: translateY(-3px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-lg);
+}
+
+.dark .timeline-post {
+  box-shadow: var(--shadow-card);
 }
 
 .dark .timeline-post:hover {
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-lg);
 }
 
 /* 左侧强调线 */

@@ -108,14 +108,14 @@ const getTagSize = (count: number) => {
 
   transform: translateY(-1px);
 
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08);
+  box-shadow: var(--shadow-xs);
 
 }
 
 
 .dark .tag-item:hover {
 
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shadow-xs);
 
 }
 
