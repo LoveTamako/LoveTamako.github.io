@@ -98,7 +98,6 @@ const tagStats = computed(() => {
   border-radius: 12px;
   text-align: center;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  margin-bottom: 1.5rem;
 }
 
 /* Navigation Card */

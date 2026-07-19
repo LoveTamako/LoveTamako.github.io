@@ -101,7 +101,7 @@ const handleDateSelect = (date: string) => {
 
 .filter-status {
   margin-bottom: 1.5rem;
-  padding: 0.75rem 0;
+  padding: 0;
   font-size: 0.9rem;
   color: var(--vp-c-text-2);
 }
