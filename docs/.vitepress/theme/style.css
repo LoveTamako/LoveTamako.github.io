@@ -69,7 +69,8 @@
 
 html {
   scroll-behavior: smooth;
-  scroll-snap-type: y proximity;
+  /* 暂时禁用 scroll snap 以排查问题 */
+  /* scroll-snap-type: y proximity; */
 }
 
 body {
@@ -544,5 +545,4 @@ body {
   scroll-snap-align: start;
   scroll-snap-stop: always;
   min-height: 100vh;
-  padding-top: calc(var(--vp-nav-height) + 2rem);
 }

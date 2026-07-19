@@ -7,7 +7,6 @@ const props = defineProps<{
 }>()
 
 const typeConfig = {
-  notes: '笔记',
   article: '文章',
   essay: '随笔'
 }
@@ -102,9 +101,9 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
 .timeline {
   width: 100%;
   position: relative;
-  --date-width: 110px;
-  --marker-width: 16px;
-  --timeline-gap: 1.5rem;
+  --date-width: 90px;
+  --marker-width: 12px;
+  --timeline-gap: 1rem;
 }
 
 .empty-state {
