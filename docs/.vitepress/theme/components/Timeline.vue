@@ -6,11 +6,6 @@ const props = defineProps<{
   posts: Post[]
 }>()
 
-const typeConfig = {
-  article: '文章',
-  essay: '随笔'
-}
-
 interface TimelineGroup {
   date: string
   posts: Post[]
@@ -51,11 +46,7 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
       <p>没有找到匹配内容</p>
     </div>
 
-    <section
-      v-for="(group, index) in timelineGroups"
-      :key="group.date"
-      class="timeline-group"
-    >
+    <section v-for="(group, index) in timelineGroups" :key="group.date" class="timeline-group">
       <!-- 日期 -->
       <time class="timeline-date">{{ group.date }}</time>
 
@@ -64,16 +55,9 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
 
       <!-- 当天文章 -->
       <div class="timeline-content">
-        <article
-          v-for="post in group.posts"
-          :key="post.url"
-          class="timeline-post"
-        >
+        <article v-for="post in group.posts" :key="post.url" class="timeline-post">
           <a :href="post.url" class="content-link">
             <h2 class="content-title">
-              <span class="content-type">
-                [{{ typeConfig[post.type] || '未分类' }}]
-              </span>
               {{ post.title }}
             </h2>
 
@@ -82,11 +66,7 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
             </p>
 
             <div v-if="post.tags?.length" class="content-tags">
-              <span
-                v-for="tag in post.tags"
-                :key="tag"
-                class="tag-item"
-              >
+              <span v-for="tag in post.tags" :key="tag" class="tag-item">
                 #{{ tag }}
               </span>
             </div>
@@ -210,12 +190,6 @@ const timelineGroups = computed<TimelineGroup[]>(() => {
   color: var(--vp-c-text-1);
   border: none;
   padding-top: 0;
-}
-
-/* 类型 */
-.content-type {
-  color: var(--vp-c-text-3);
-  font-weight: 400;
 }
 
 /* 描述 */

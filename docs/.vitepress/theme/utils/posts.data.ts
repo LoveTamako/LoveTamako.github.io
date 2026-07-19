@@ -4,7 +4,6 @@ export interface Post {
   title: string
   url: string
   date: string
-  type: 'notes' | 'article' | 'essay'
   tags: string[]
   description?: string
   excerpt?: string
@@ -21,7 +20,6 @@ export default createContentLoader('**/*.md', {
         title: frontmatter.title || 'Untitled',
         url,
         date: frontmatter.date || '',
-        type: frontmatter.type || 'notes',
         tags: frontmatter.tags || [],
         description: frontmatter.description || '',
         excerpt: excerpt || ''

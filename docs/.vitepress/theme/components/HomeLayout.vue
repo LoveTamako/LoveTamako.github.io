@@ -3,15 +3,13 @@ import { ref, computed } from 'vue'
 import type { Post } from '../utils/posts.data'
 import { data as allPosts } from '../utils/posts.data'
 import Sidebar from './Sidebar.vue'
-import PostList from './PostList.vue'
+import Timeline from './Timeline.vue'
 
 const selectedTag = ref<string>()
 const selectedDate = ref<string>()
 
 const posts = computed(() => {
-  return allPosts.filter(
-    post => post.type === 'article' || post.type === 'essay'
-  )
+  return allPosts
 })
 
 const matchTag = (post: Post) => {
@@ -68,7 +66,7 @@ const handleDateSelect = (date: string) => {
           </span>
         </div>
 
-        <PostList :posts="filteredPosts" />
+        <Timeline :posts="filteredPosts" />
       </main>
 
       <aside class="sidebar-wrapper">
