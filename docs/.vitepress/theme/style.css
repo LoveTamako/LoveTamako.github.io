@@ -251,6 +251,11 @@ body {
   z-index: 1;
 }
 
+/* 当 Features 作为第一个元素时，添加顶部间距 */
+.VPHome .VPFeatures:first-child {
+  padding-top: 2rem;
+}
+
 .VPHome .VPHero {
   min-height: 100vh;
   scroll-snap-align: start;
