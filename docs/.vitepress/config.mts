@@ -145,6 +145,7 @@ export default defineConfig({
                 { text: '7.7. ReentrantReadWriteLock', link: '/notes/java/juc/concurrent-tools/reentrant-read-write-lock' },
                 { text: '7.8. StampedLock', link: '/notes/java/juc/concurrent-tools/stamped-lock' },
                 { text: '7.9. Semaphore', link: '/notes/java/juc/concurrent-tools/semaphore' },
+                { text: '7.10. CountDownLatch', link: '/notes/java/juc/concurrent-tools/countdown-latch' },
               ]
             },
           ]
