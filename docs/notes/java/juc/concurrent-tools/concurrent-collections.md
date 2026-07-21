@@ -115,6 +115,17 @@ Map<String, String> map = Collections.synchronizedMap(new HashMap<>());
 - **求大小弱一致性**：`size()` 方法返回的是近似值，可能不准确
 - **读取弱一致性**：读操作可能读到稍旧的数据
 
-**对比 fail-fast**：
-
+:::tip 对比 fail-fast
 对于非线程安全容器（如 ArrayList、HashMap），遍历时如果发生修改，使用 **fail-fast** 机制让遍历立刻失败，抛出 `ConcurrentModificationException`。
+:::
+
+## 总结
+
+**锁 vs 线程安全集合**：
+
+- **锁**：是一种通用的同步机制，可以保护普通集合（如使用 `synchronized` 或 `Lock` 包装 ArrayList、HashMap）
+- **线程安全集合**：针对特定数据结构设计的高性能并发实现，内置了优化的同步机制
+
+**使用建议**：
+- 简单场景可以用锁保护普通集合
+- 高并发集合操作应该优先使用 JUC 提供的并发集合，性能更好且避免常见并发错误
