@@ -191,37 +191,17 @@ private void signalNotFull() {
 5. 如果队列不为空，唤醒其他等待出队的线程
 6. 如果出队前队列已满，唤醒等待入队的线程
 
-### 双锁机制的优势
+### 核心设计特点
 
-LinkedBlockingQueue 的双锁设计相比单锁实现有显著的性能优势：
+LinkedBlockingQueue 采用**双锁机制**（putLock 和 takeLock）实现入队和出队的并发操作：
 
-**并发性提升：**
-- **入队和出队可以并发**：putLock 和 takeLock 相互独立，生产者和消费者可以同时操作队列
-- **减少锁竞争**：多个生产者只竞争 putLock，多个消费者只竞争 takeLock
+- **入队和出队可以并发执行**：两把锁相互独立，生产者和消费者可以同时操作队列
+- **使用 AtomicInteger 维护 count**：保证在双锁机制下计数的准确性
+- **哨兵节点设计**：head 是不存储数据的哨兵节点，简化边界条件处理
 
-**关键设计点：**
-
-1. **AtomicInteger count**
-   - 使用原子类而不是普通变量，因为 put 和 take 都需要修改 count
-   - 保证在双锁机制下计数的准确性
-
-2. **跨锁唤醒**
-   - `signalNotEmpty()` 和 `signalNotFull()` 需要获取对方的锁才能唤醒等待线程
-   - 确保条件变量的正确使用（条件变量必须与持有的锁配对）
-
-3. **哨兵节点（head）**
-   - head 节点不存储数据，简化了边界条件的处理
-   - 出队时将 head.next 提升为新的 head，并清空其数据
-
-**性能对比：**
-- **单锁队列**（如 ArrayBlockingQueue）：入队和出队互斥，吞吐量受限
-- **双锁队列**（LinkedBlockingQueue）：入队和出队并发，吞吐量更高
-
-适用于**生产者-消费者**模式，尤其是生产和消费速率接近的场景。
+关于双锁机制的详细设计原理和优势,请参见下方的"加锁分析"章节。
 
 ## 加锁分析
-
-高明之处在于使用了两把锁和dummy节点
 
 ### 为什么使用两把锁？
 
@@ -386,3 +366,293 @@ if (c == capacity)  // 出队前队列已满，肯定有 put 线程在等待
 ```
 
 这样减少了不必要的跨锁操作，提升性能。
+
+## put 方法详解
+
+`put()` 方法用于向队列添加元素，如果队列已满则阻塞等待，直到有空间可用。
+
+### 源码分析
+
+```java
+public void put(E e) throws InterruptedException {
+    // 1. 不允许 null 元素
+    if (e == null) throw new NullPointerException();
+
+    int c = -1;
+    // 2. 创建新节点
+    Node<E> node = new Node<E>(e);
+    final ReentrantLock putLock = this.putLock;
+    final AtomicInteger count = this.count;
+
+    // 3. 获取入队锁（可中断）
+    putLock.lockInterruptibly();
+    try {
+        // 4. 队列已满，等待 notFull 条件
+        while (count.get() == capacity) {
+            notFull.await();  // 释放 putLock，进入等待状态
+        }
+
+        // 5. 入队：将新节点添加到链表尾部
+        enqueue(node);
+
+        // 6. 元素个数加 1，返回加之前的值
+        c = count.getAndIncrement();
+
+        // 7. 如果入队后队列仍未满，唤醒一个等待的 put 线程
+        if (c + 1 < capacity)
+            notFull.signal();
+    } finally {
+        // 8. 释放入队锁
+        putLock.unlock();
+    }
+
+    // 9. 如果入队前队列为空，唤醒等待的 take 线程
+    if (c == 0)
+        signalNotEmpty();
+}
+```
+
+### 关键点分析
+
+#### 1. 为什么使用 lockInterruptibly()？
+
+```java
+putLock.lockInterruptibly();  // 而不是 lock()
+```
+
+**原因：** 支持线程中断，避免线程永久阻塞。
+
+- 如果使用 `lock()`，线程在等待锁时不响应中断
+- 使用 `lockInterruptibly()` 后，其他线程可以通过 `interrupt()` 中断正在等待的线程
+- 这在需要取消任务或优雅关闭时非常重要
+
+#### 2. 为什么在锁外创建节点？
+
+```java
+Node<E> node = new Node<E>(e);  // 在获取锁之前
+putLock.lockInterruptibly();
+```
+
+**原因：** 减少锁持有时间，提升并发性能。
+
+- 创建节点是一个纯内存操作，不涉及共享状态
+- 在锁外完成可以减少临界区的长度
+- 其他线程可以更快地获取锁
+
+#### 3. 为什么使用 while 而不是 if？
+
+```java
+while (count.get() == capacity) {  // 而不是 if
+    notFull.await();
+}
+```
+
+**原因：** 防止**虚假唤醒**（spurious wakeup）。
+
+- Condition.await() 可能会在没有 signal 的情况下被唤醒
+- 使用 while 循环可以重新检查条件，确保条件真正满足
+- 这是使用条件变量的标准模式
+
+**示例场景：**
+
+```
+1. 线程 A：队列满（capacity=10, count=10），await() 等待
+2. 线程 B：队列满（capacity=10, count=10），await() 等待
+3. 线程 C：take() 出队一个元素，count=9，signal() 唤醒线程 A
+4. 线程 A：被唤醒，入队成功，count=10
+5. 线程 B：也被唤醒（虚假唤醒或其他原因）
+6. 如果用 if：线程 B 直接入队，导致 count=11，超出容量！
+7. 如果用 while：线程 B 重新检查 count==capacity，继续等待 ✓
+```
+
+#### 4. c 变量的作用
+
+```java
+c = count.getAndIncrement();  // 返回加之前的值
+
+if (c + 1 < capacity)  // 使用 c+1（加之后的值）
+    notFull.signal();
+
+if (c == 0)  // 使用 c（加之前的值）
+    signalNotEmpty();
+```
+
+**关键点：**
+
+- `c` 保存的是 **count 加 1 之前的值**
+- `c + 1` 表示加 1 之后的值（当前队列大小）
+- `c == 0` 表示入队前队列为空
+
+#### 5. 唤醒机制的优化
+
+**在锁内唤醒 put 线程：**
+
+```java
+if (c + 1 < capacity)
+    notFull.signal();  // 在 putLock 保护下直接唤醒
+```
+
+- 条件：入队后队列仍未满（`c+1 < capacity`）
+- 目的：唤醒其他等待入队的线程
+- 优化：在持有 putLock 时直接 signal，无需跨锁
+
+**跨锁唤醒 take 线程：**
+
+```java
+if (c == 0)
+    signalNotEmpty();  // 需要获取 takeLock
+```
+
+- 条件：入队前队列为空（`c == 0`）
+- 目的：唤醒等待出队的线程
+- 代价：需要额外获取 takeLock（跨锁操作）
+
+**为什么是 c == 0 而不是 c + 1 == 1？**
+
+两者等价，但 `c == 0` 语义更清晰：
+- `c == 0` 表示"入队前为空"，说明肯定有 take 线程在等待
+- 只在这种情况下才需要跨锁唤醒，减少不必要的开销
+
+### 执行流程图
+
+```
+线程调用 put(e)
+    ↓
+检查 e != null
+    ↓
+创建 Node(e)  ← 在锁外完成
+    ↓
+获取 putLock.lockInterruptibly()
+    ↓
+┌─→ 检查 count == capacity?
+│       ↓ 是
+│   notFull.await()  ← 释放锁，等待
+│       ↓ 被唤醒
+└───────┘
+    ↓ 否
+enqueue(node)  ← 添加到链表尾部
+    ↓
+c = count.getAndIncrement()  ← 原子递增
+    ↓
+c+1 < capacity?
+    ↓ 是
+notFull.signal()  ← 唤醒其他 put 线程
+    ↓
+释放 putLock
+    ↓
+c == 0?  ← 入队前为空？
+    ↓ 是
+signalNotEmpty()  ← 跨锁唤醒 take 线程
+    ↓
+返回
+```
+
+### 重要场景分析
+
+#### 场景 1：队列从空到非空
+
+```
+初始状态：capacity=3, count=0, 队列为空
+有 2 个 take 线程在 notEmpty.await() 等待
+
+线程 P1 执行 put(e1)：
+1. 获取 putLock
+2. count=0 < capacity=3，无需等待
+3. enqueue(e1)
+4. c = count.getAndIncrement() → c=0, count=1
+5. c+1=1 < capacity=3 → notFull.signal()（实际没有等待的 put 线程）
+6. 释放 putLock
+7. c==0 → signalNotEmpty()  ← 关键：唤醒一个 take 线程
+```
+
+**关键点：** `c==0` 触发跨锁唤醒，通知等待的消费者队列已有数据。
+
+#### 场景 2：队列从满到非满（由 take 触发）
+
+```
+初始状态：capacity=3, count=3, 队列已满
+有 2 个 put 线程在 notFull.await() 等待
+
+线程 T1 执行 take()：
+1. 获取 takeLock
+2. count=3 > 0，无需等待
+3. dequeue()
+4. c = count.getAndDecrement() → c=3, count=2
+5. c=3 > 1 → notEmpty.signal()（唤醒其他 take 线程）
+6. 释放 takeLock
+7. c==capacity → signalNotFull()  ← 关键：唤醒一个 put 线程
+```
+
+**关键点：** take 操作在 `c==capacity` 时会唤醒等待的生产者。
+
+#### 场景 3：多个 put 线程级联唤醒
+
+```
+初始状态：capacity=3, count=2
+有 3 个 put 线程 P1、P2、P3 在 notFull.await() 等待
+
+线程 T1 执行 take()：
+1. c = count.getAndDecrement() → c=3, count=2
+2. c==capacity → signalNotFull() 唤醒 P1
+
+线程 P1 被唤醒：
+1. 入队成功，c = count.getAndIncrement() → c=2, count=3
+2. c+1=3 < capacity=3? → 否，不唤醒其他 put 线程
+
+此时 P2、P3 继续等待，直到下一次 take 操作
+```
+
+**关键点：** 只有在入队后队列仍未满时才会级联唤醒，避免无效唤醒。
+
+### 注意事项
+
+1. **null 元素不允许**
+   - put(null) 会立即抛出 NullPointerException
+   - 这是为了避免 null 作为特殊标记值导致的歧义
+
+2. **阻塞可中断**
+   - put() 声明抛出 InterruptedException
+   - 线程在等待锁或等待条件时都可以被中断
+   - 适合需要取消或超时控制的场景
+
+3. **性能考虑**
+   - 跨锁唤醒（signalNotEmpty）有额外开销
+   - 但只在 c==0 时触发，频率较低
+   - 对于生产消费速率接近的场景，性能优秀
+
+## LinkedBlockingQueue VS ArrayBlockingQueue
+
+### 核心差异对比
+
+| 特性 | LinkedBlockingQueue | ArrayBlockingQueue |
+|------|-------------------|-------------------|
+| **底层结构** | 单向链表 | 数组 |
+| **容量** | 默认 Integer.MAX_VALUE（近似无界）| 必须指定固定容量 |
+| **锁机制** | 双锁（putLock + takeLock）| 单锁 |
+| **入队出队** | 可并发执行 | 互斥执行 |
+| **内存分配** | 动态分配节点 | 预分配数组 |
+| **GC 压力** | 较高（频繁创建销毁节点）| 较低（复用数组空间）|
+| **吞吐量** | 高（双锁并发）| 相对较低（单锁互斥）|
+| **缓存局部性** | 差（链表节点分散）| 好（数组连续内存）|
+
+### 关键区别
+
+**锁机制：**
+- LinkedBlockingQueue 使用 putLock 和 takeLock 双锁，允许生产者和消费者并发操作
+- ArrayBlockingQueue 使用单锁，入队和出队必须互斥执行
+
+**内存特征：**
+- LinkedBlockingQueue 按需创建节点，每个元素额外 20-32 字节开销，GC 压力较大
+- ArrayBlockingQueue 预分配数组，内存连续，缓存友好，GC 压力小
+
+### 选择建议
+
+**选择 LinkedBlockingQueue：**
+- 高并发场景，多个生产者和消费者并发操作
+- 容量难以预估或需要近似无界队列
+- 吞吐量优先，可接受额外内存开销
+
+**选择 ArrayBlockingQueue：**
+- 低并发场景或容量可预估
+- 内存敏感，需要减少 GC 压力
+- 小容量队列（如 < 1000 个元素）

@@ -149,6 +149,7 @@ export default defineConfig({
                 { text: '7.11. CyclicBarrier', link: '/notes/java/juc/concurrent-tools/cyclic-barrier' },
                 { text: '7.12. 线程安全集合类概述', link: '/notes/java/juc/concurrent-tools/concurrent-collections' },
                 { text: '7.12. ConcurrentHashMap', link: '/notes/java/juc/concurrent-tools/concurrent-hash-map' },
+                { text: '7.13. LinkedBlockingQueue', link: '/notes/java/juc/concurrent-tools/linked-blocking-queue' },
               ]
             },
           ]
