@@ -1,0 +1,113 @@
+export const javaSidebar = [
+    {
+        text: 'Java',
+        items: [
+            { text: '开始', link: '/notes/java/start' }
+        ]
+    },
+    {
+        text: 'JUC并发编程',
+        link: '/notes/java/juc/overview',
+        collapsed: true, // <-- 关键：设置为可折叠
+        items: [
+            {
+                text: '1. 进程与线程',
+                collapsed: true,
+                items: [
+                    { text: '1.1. 进程与线程', link: '/notes/java/juc/process-thread/process-thread' },
+                    { text: '1.2. 并行与并发', link: '/notes/java/juc/process-thread/parallel-concurrent' },
+                    { text: '1.3. 应用', link: '/notes/java/juc/process-thread/use-cases' }
+                ]
+            },
+            {
+                text: '2. Java线程',
+                collapsed: true,
+                items: [
+                    { text: '2.1. 创建和运行线程', link: '/notes/java/juc/java-thread/create-run-thread' },
+                    { text: '2.2. 查看进程线程', link: '/notes/java/juc/java-thread/process-and-thread-monitoring' },
+                    { text: '2.3. 线程运行原理', link: '/notes/java/juc/java-thread/thread-execution-model' },
+                    { text: '2.4. 常见方法', link: '/notes/java/juc/java-thread/thread-methods' },
+                    { text: '2.5. 线程状态', link: '/notes/java/juc/java-thread/thread-state' },
+                ]
+            },
+            {
+                text: '3. 共享模型之管程',
+                link: '/notes/java/juc/shared-memory-monitors/overview',
+                collapsed: true,
+                items: [
+                    { text: '3.1. 共享带来的问题', link: '/notes/java/juc/shared-memory-monitors/shared-memory-problems' },
+                    { text: '3.2. synchronized', link: '/notes/java/juc/shared-memory-monitors/synchronized' },
+                    { text: '3.3. 线程安全分析', link: '/notes/java/juc/shared-memory-monitors/thread-safety-analysis' },
+                    { text: '3.4. Monitor', link: '/notes/java/juc/shared-memory-monitors/monitor' },
+                    { text: '3.5. synchronized原理进阶', link: '/notes/java/juc/shared-memory-monitors/synchronized-internals' },
+                    { text: '3.6. wait & notify', link: '/notes/java/juc/shared-memory-monitors/wait-notify' },
+                    { text: '3.7. park & unpark', link: '/notes/java/juc/shared-memory-monitors/park-unpark' },
+                    { text: '3.8. 线程状态转换', link: '/notes/java/juc/shared-memory-monitors/rethinking-thread-state-transitions' },
+                    { text: '3.9. 多把锁', link: '/notes/java/juc/shared-memory-monitors/multiple-locks' },
+                    { text: '3.10. 活跃性', link: '/notes/java/juc/shared-memory-monitors/liveness' },
+                    { text: '3.11. ReentrantLock', link: '/notes/java/juc/shared-memory-monitors/reentrantLock' },
+                    { text: '3.12. 同步模式之顺序控制', link: '/notes/java/juc/shared-memory-monitors/order-control' },
+                ]
+            },
+            {
+                text: '4. 共享模型之内存',
+                link: '/notes/java/juc/shared-memory-model/overview',
+                collapsed: true,
+                items: [
+                    { text: '4.1. Java 内存模型', link: '/notes/java/juc/shared-memory-model/java-memory-model' },
+                    { text: '4.2. 可见性', link: '/notes/java/juc/shared-memory-model/visibility' },
+                    { text: '4.3. 终止模式之两阶段终止', link: '/notes/java/juc/shared-memory-model/two-phase-termination' },
+                    { text: '4.4. 有序性', link: '/notes/java/juc/shared-memory-model/ordering' },
+                    { text: '4.5. volatile 原理', link: '/notes/java/juc/shared-memory-model/volatile-internals' },
+                ]
+            },
+            {
+                text: '5. 共享模型之无锁',
+                link: '/notes/java/juc/shared-memory-model-lock-free/overview',
+                collapsed: true,
+                items: [
+                    { text: '5.1. CAS', link: '/notes/java/juc/shared-memory-model-lock-free/cas' },
+                    { text: '5.2. 原子整数', link: '/notes/java/juc/shared-memory-model-lock-free/atomic-integer' },
+                    { text: '5.3. 原子引用', link: '/notes/java/juc/shared-memory-model-lock-free/atomic-reference' },
+                    { text: '5.4. 原子数组', link: '/notes/java/juc/shared-memory-model-lock-free/atomic-array' },
+                    { text: '5.5. 原子更新器', link: '/notes/java/juc/shared-memory-model-lock-free/atomic-updater' },
+                    { text: '5.6. 原子累加器', link: '/notes/java/juc/shared-memory-model-lock-free/atomic-accumulator' },
+                    { text: '5.7. Unsafe', link: '/notes/java/juc/shared-memory-model-lock-free/unsafe' },
+                ]
+            },
+            {
+                text: '6. 共享模型之不可变',
+                link: '/notes/java/juc/shared-memory-model-immutability/overview',
+                collapsed: true,
+                items: [
+                    { text: '6.1. 不可变对象', link: '/notes/java/juc/shared-memory-model-immutability/immutable-object' },
+                    { text: '6.2. 享元模式', link: '/notes/java/juc/shared-memory-model-immutability/flyweight-pattern' },
+                    { text: '6.3. final原理', link: '/notes/java/juc/shared-memory-model-immutability/final-principle' },
+                ]
+            },
+            {
+                text: '7. 共享模型之并发工具',
+                //  link: '/notes/java/juc/concurrent-tools/overview',
+                collapsed: true,
+                items: [
+                    { text: '7.1. 自定义线程池', link: '/notes/java/juc/concurrent-tools/custom-thread-pool' },
+                    { text: '7.2. ThreadPoolExecutor', link: '/notes/java/juc/concurrent-tools/thread-pool-executor' },
+                    { text: '7.3. 任务调度线程池', link: '/notes/java/juc/concurrent-tools/scheduled-thread-pool' },
+                    { text: '7.4. ForkJoinPool 线程池', link: '/notes/java/juc/concurrent-tools/fork-join' },
+                    { text: '7.5. AQS', link: '/notes/java/juc/concurrent-tools/aqs' },
+                    { text: '7.6. ReentrantLock 原理', link: '/notes/java/juc/concurrent-tools/reentrant-lock' },
+                    { text: '7.7. ReentrantReadWriteLock', link: '/notes/java/juc/concurrent-tools/reentrant-read-write-lock' },
+                    { text: '7.8. StampedLock', link: '/notes/java/juc/concurrent-tools/stamped-lock' },
+                    { text: '7.9. Semaphore', link: '/notes/java/juc/concurrent-tools/semaphore' },
+                    { text: '7.10. CountDownLatch', link: '/notes/java/juc/concurrent-tools/countdown-latch' },
+                    { text: '7.11. CyclicBarrier', link: '/notes/java/juc/concurrent-tools/cyclic-barrier' },
+                    { text: '7.12. 线程安全集合类概述', link: '/notes/java/juc/concurrent-tools/concurrent-collections' },
+                    { text: '7.13. ConcurrentHashMap', link: '/notes/java/juc/concurrent-tools/concurrent-hash-map' },
+                    { text: '7.14. LinkedBlockingQueue', link: '/notes/java/juc/concurrent-tools/linked-blocking-queue' },
+                    { text: '7.15. ConcurrentLinkedQueue', link: '/notes/java/juc/concurrent-tools/concurrent-linked-queue' },
+                    { text: '7.16. CopyOnWriteArrayList', link: '/notes/java/juc/concurrent-tools/copy-on-write-array-list' },
+                ]
+            },
+        ]
+    }
+]
