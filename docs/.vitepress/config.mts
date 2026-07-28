@@ -150,7 +150,8 @@ export default defineConfig({
                 { text: '7.12. 线程安全集合类概述', link: '/notes/java/juc/concurrent-tools/concurrent-collections' },
                 { text: '7.13. ConcurrentHashMap', link: '/notes/java/juc/concurrent-tools/concurrent-hash-map' },
                 { text: '7.14. LinkedBlockingQueue', link: '/notes/java/juc/concurrent-tools/linked-blocking-queue' },
-                { text: '7.15. ConcurrentLinkedQueue', link: '/notes/java/juc/concurrent-tools/concurrent-linked-queue' }, 
+                { text: '7.15. ConcurrentLinkedQueue', link: '/notes/java/juc/concurrent-tools/concurrent-linked-queue' },
+                { text: '7.15. CopyOnWriteArrayList', link: '/notes/java/juc/concurrent-tools/copy-on-write-array-list' },
               ]
             },
           ]
