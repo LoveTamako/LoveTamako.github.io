@@ -5,9 +5,11 @@ export const redisSidebar = [
         items: [
             {
                 text: '基础篇',
-                link: '/notes/redis/basic/',
                 collapsed: true,
                 items: [
+                    {
+                        text: '1. 初识 Redis', link: '/notes/redis/basic/introduction'
+                    }
                 ]
             }
         ]
