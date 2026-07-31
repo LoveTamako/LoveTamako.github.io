@@ -8,7 +8,8 @@ export const redisSidebar = [
                 collapsed: true,
                 items: [
                     { text: '1. 初识 Redis', link: '/notes/redis/basic/introduction' },
-                    { text: '2. Redis 命令', link: '/notes/redis/basic/commands' }
+                    { text: '2. Redis 命令', link: '/notes/redis/basic/commands' },
+                    { text: '3. Redis Java 客户端', link: '/notes/redis/basic/java-client' }
                 ]
             }
         ]
