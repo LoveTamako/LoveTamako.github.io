@@ -325,22 +325,26 @@ Redis 的 SortedSet（有序集合）是一个可排序的 Set 集合，与 Java
 
 ### 常用命令
 
+::: tip 命名规则
+SortedSet 的排名和范围查询命令默认按分数**升序**排列。如需**降序**排列，在命令名中 `Z` 后添加 `REV` 即可，如 `ZRANGE` 对应 `ZREVRANGE`，`ZRANK` 对应 `ZREVRANK`。
+:::
+
 | 命令 | 语法 | 说明 | 返回值 |
 |------|------|------|--------|
 | ZADD | `ZADD key score member [score member ...]` | 向有序集合添加一个或多个成员及其分数 | 成功添加的成员数量 |
 | ZREM | `ZREM key member [member ...]` | 从有序集合中移除一个或多个成员 | 成功移除的成员数量 |
 | ZSCORE | `ZSCORE key member` | 获取有序集合中指定成员的分数 | 分数值或 nil |
 | ZRANK | `ZRANK key member` | 获取有序集合中成员的排名（升序，从0开始） | 排名或 nil |
-| ZREVRANK | `ZREVRANK key member` | 获取有序集合中成员的排名（降序，从0开始） | 排名或 nil |
 | ZCARD | `ZCARD key` | 获取有序集合的成员数量 | 成员数量 |
 | ZCOUNT | `ZCOUNT key min max` | 获取指定分数区间内的成员数量 | 成员数量 |
 | ZINCRBY | `ZINCRBY key increment member` | 为有序集合中指定成员的分数增加指定值 | 增加后的分数 |
 | ZRANGE | `ZRANGE key start stop [WITHSCORES]` | 获取指定排名范围内的成员（升序） | 成员列表 |
-| ZREVRANGE | `ZREVRANGE key start stop [WITHSCORES]` | 获取指定排名范围内的成员（降序） | 成员列表 |
 | ZRANGEBYSCORE | `ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]` | 获取指定分数区间内的成员（升序） | 成员列表 |
-| ZREVRANGEBYSCORE | `ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]` | 获取指定分数区间内的成员（降序） | 成员列表 |
 | ZPOPMIN | `ZPOPMIN key [count]` | 移除并返回分数最低的一个或多个成员 | 成员和分数列表 |
 | ZPOPMAX | `ZPOPMAX key [count]` | 移除并返回分数最高的一个或多个成员 | 成员和分数列表 |
+| ZDIFF | `ZDIFF numkeys key [key ...] [WITHSCORES]` | 计算多个有序集合的差集 | 成员列表 |
+| ZINTER | `ZINTER numkeys key [key ...] [WEIGHTS weight ...] [AGGREGATE SUM\|MIN\|MAX] [WITHSCORES]` | 计算多个有序集合的交集 | 成员列表 |
+| ZUNION | `ZUNION numkeys key [key ...] [WEIGHTS weight ...] [AGGREGATE SUM\|MIN\|MAX] [WITHSCORES]` | 计算多个有序集合的并集 | 成员列表 |
 
 ::: tip
 `ZRANGE` 和 `ZREVRANGE` 的索引支持负数，`-1` 表示最后一个元素，`-2` 表示倒数第二个元素。添加 `WITHSCORES` 参数可以同时返回分数。
@@ -388,6 +392,30 @@ ZCOUNT game:rank 1000 +inf
 # 移除成员
 ZREM game:rank "player3"
 # 返回：(integer) 1
+
+# 创建两个有序集合用于演示集合运算
+ZADD zset1 100 "a" 200 "b" 300 "c"
+ZADD zset2 150 "b" 300 "c" 400 "d"
+
+# 计算交集（默认分数求和）
+ZINTER 2 zset1 zset2 WITHSCORES
+# 返回：1) "b" 2) "350" 3) "c" 4) "600"
+
+# 计算交集（分数取最小值）
+ZINTER 2 zset1 zset2 AGGREGATE MIN WITHSCORES
+# 返回：1) "b" 2) "150" 3) "c" 4) "300"
+
+# 计算并集
+ZUNION 2 zset1 zset2 WITHSCORES
+# 返回：1) "a" 2) "100" 3) "b" 4) "350" 5) "c" 6) "600" 7) "d" 8) "400"
+
+# 计算差集（zset1 有但 zset2 没有的元素）
+ZDIFF 2 zset1 zset2 WITHSCORES
+# 返回：1) "a" 2) "100"
+
+# 使用权重计算交集（zset1 权重2，zset2 权重3）
+ZINTER 2 zset1 zset2 WEIGHTS 2 3 WITHSCORES
+# 返回：1) "b" 2) "850" 3) "c" 4) "1500"
 ```
 
 ### 应用场景
