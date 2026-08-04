@@ -245,7 +245,7 @@ public class User {
 
 ### 登录验证功能
 
-在完成登录后，需要对后续请求进行登录状态校验。通过拦截器统一处理登录验证逻辑，使用ThreadLocal保存当前用户信息，避免在每个接口中重复编写校验代码。
+在完成登录后，需要对后续请求进行登录状态校验。通过拦截器统一处理登录验证逻辑，使用 [ThreadLocal](/posts/thread-local.md) 保存当前用户信息，避免在每个接口中重复编写校验代码。
 
 ![登录拦截器流程图](practical.assets/sms-login-interceptor.png)
 
@@ -363,6 +363,117 @@ public class UserController {
 
 4. **符合 RESTful 规范**：POST 创建会话，GET 查询资源
 
+:::
+
+### 隐藏用户敏感信息
+
+在前面的实现中，我们直接将完整的 `User` 对象保存到 Session 并返回给前端。但 `User` 实体类包含了所有数据库字段，其中部分字段属于敏感信息，不应该暴露给客户端。
+
+**存在的安全问题**：
+
+当前代码中，`/user/me` 接口直接返回完整的 User 对象：
+
+```java
+@GetMapping("/me")
+public Result me() {
+    User user = UserHolder.getUser();
+    return Result.ok(user);  // 直接返回完整对象
+}
+```
+
+返回的数据可能包含：
+- `password`：用户密码（即使加密后也不应返回）
+- `phone`：完整手机号
+- `createTime`、`updateTime`：内部时间戳
+
+**解决方案**：创建 UserDTO 只返回必要信息
+
+#### 代码实现
+
+**创建 UserDTO 类**
+
+```java
+@Data
+public class UserDTO {
+    private Long id;
+    private String nickName;
+    private String icon;
+}
+```
+
+**修改 Service 层**
+
+在用户登录时，只保存必要信息到 Session：
+
+```java
+@Override
+public Result login(LoginFormDTO loginForm, HttpSession session) {
+    // ... 前面的校验和用户查询逻辑 ...
+
+    // 6. 保存用户信息到 session 中（使用 DTO）
+    UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+    session.setAttribute("user", userDTO);
+
+    return Result.ok();
+}
+```
+
+**修改拦截器**
+
+```java
+@Override
+public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
+    HttpSession session = request.getSession();
+
+    // 获取 session 中的用户（现在是 UserDTO）
+    UserDTO user = (UserDTO) session.getAttribute("user");
+
+    if (user == null) {
+        response.setStatus(401);
+        return false;
+    }
+
+    UserHolder.saveUser(user);
+    return true;
+}
+```
+
+**修改 UserHolder 工具类**
+
+```java
+public class UserHolder {
+    private static final ThreadLocal<UserDTO> tl = new ThreadLocal<>();
+
+    public static void saveUser(UserDTO user) {
+        tl.set(user);
+    }
+
+    public static UserDTO getUser() {
+        return tl.get();
+    }
+
+    public static void removeUser() {
+        tl.remove();
+    }
+}
+```
+
+**修改 Controller**
+
+```java
+@GetMapping("/me")
+public Result me() {
+    // 返回的是 UserDTO，只包含必要信息
+    UserDTO user = UserHolder.getUser();
+    return Result.ok(user);
+}
+```
+
+::: tip 数据安全最佳实践
+1. **最小化原则**：只返回前端必需的数据
+2. **敏感字段脱敏**：手机号可以显示为 `138****1234`
+3. **分层隔离**：Entity 用于数据库操作，DTO 用于数据传输
+4. **字段白名单**：明确列出可返回字段，而非黑名单排除
 :::
 
 ## 集群的 Session 共享问题
