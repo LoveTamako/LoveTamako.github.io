@@ -18,6 +18,7 @@ export const redisSidebar = [
                 collapsed: true,
                 items: [
                     { text: '1. 短信登录', link: '/notes/redis/practical/sms-login' },
+                    { text: '2. 商户查询缓存', link: '/notes/redis/practical/merchant-cache' },
                 ]
             }
         ]
