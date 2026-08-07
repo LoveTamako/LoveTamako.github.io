@@ -379,10 +379,200 @@ public class ShopServiceImpl implements ShopService {
 2. **更新操作**：先调用 `updateById()` 更新数据库，再调用 `delete()` 删除缓存
 3. **事务保证**：使用 `@Transactional` 注解确保数据库更新和缓存删除的原子性
 4. **常量提取**：将缓存 key 前缀和 TTL 提取为常量，便于维护
+5. **幂等性保证**：Redis 的 `delete()` 操作本身是幂等的，即使 key 不存在也不会报错，不会影响数据库更新
 
 ## 缓存穿透
 
+### 问题描述
+
+缓存穿透是指客户端请求的数据在缓存和数据库中都不存在，导致每次请求都会穿透缓存直接访问数据库。
+
+**常见场景**：
+- 用户恶意攻击，使用大量不存在的 ID 发起查询请求
+- 业务逻辑错误，查询了本就不存在的数据
+
+**危害**：
+- 缓存失去保护作用，所有请求直接打到数据库
+- 数据库压力骤增，可能导致数据库宕机
+- 影响系统整体性能和可用性
+
+### 解决方案
+
+| 方案 | 实现原理 | 优点 | 缺点 | 适用场景 |
+|---|---|---|---|---|
+| **缓存空对象** | 当数据库查询结果为空时，将空值（null 或空对象）写入缓存，并设置较短的 TTL | 实现简单，维护方便 | 额外的内存消耗，可能造成短期的不一致 | 数据命中率较高，攻击风险较低的场景 |
+| **布隆过滤器** | 在缓存前增加布隆过滤器，快速判断数据是否存在，不存在则直接拒绝请求 | 内存占用少，性能高，没有多余 key | 实现复杂，存在误判可能（可能把存在的数据判断为不存在），数据新增时需同步更新过滤器 | 数据量大，对内存敏感，能接受极小误判率的场景 |
+
+除了上述缓存层面的技术方案，还应从系统设计和安全角度采取综合防护措施：
+
+- **增强 ID 复杂度**：避免使用连续递增的数字 ID，改用 UUID、雪花算法等生成的分布式 ID，防止攻击者通过规律猜测有效 ID
+- **数据基础校验**：在接口层对请求参数进行格式校验和合法性校验，及早拦截明显不合法的请求
+- **用户权限校验**：加强身份认证和授权机制，限制匿名用户或低信用用户的访问频率
+- **热点参数限流**：使用 Sentinel、Hystrix 等流控组件，对单个 ID 或用户的请求频率进行限制，防止恶意刷接口
+- **监控告警**：监控缓存未命中率、数据库访问量等指标，异常时及时告警并采取应急措施
+
+#### 缓存空对象方案
+
+![缓存空对象](image-3.png)
+
+当查询数据库返回 null 时，将空值缓存起来，下次相同请求直接返回空结果，避免重复查询数据库。
+
+**注意事项**：
+- 设置较短的 TTL（如 2-5 分钟），避免数据新增后长时间查不到
+- 考虑内存占用，如果恶意请求的 ID 数量巨大，可能占用大量内存
+
+#### 布隆过滤器方案
+
+![布隆过滤](image-4.png)
+
+布隆过滤器是一种空间效率极高的概率型数据结构，用于判断元素是否在集合中。
+
+**工作原理**：
+- 将所有可能存在的数据提前加载到布隆过滤器中
+- 请求到来时，先查询布隆过滤器判断数据是否存在
+- 若不存在则直接拒绝，若存在则继续查询缓存和数据库
+
+**注意事项**：
+- 存在误判率：可能将存在的数据判断为不存在（概率很低，可通过调整参数控制）
+- 不支持删除：需要重建整个过滤器
+- 数据新增时需要同步更新过滤器
+
+### 实际案例
+
+对前面的[商铺查询方案](#实现方案)进行优化，采用缓存空对象的方式解决缓存穿透问题。
+
+![新流程](image-5.png)
+
+#### 代码实现
+
+**Service 层**
+
+```java
+@Service
+public class ShopServiceImpl implements ShopService {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private ShopMapper shopMapper;
+
+    private static final String CACHE_SHOP_KEY = "cache:shop:";
+    private static final Long CACHE_SHOP_TTL = 30L;
+    private static final Long CACHE_NULL_TTL = 2L;
+
+    @Override
+    public Result queryById(Long id) {
+        String key = CACHE_SHOP_KEY + id;
+
+        // 1. 从 Redis 查询商铺缓存
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+
+        // 2. 判断缓存是否存在
+        if (StrUtil.isNotBlank(shopJson)) {
+            // 3. 存在，直接返回
+            Shop shop = JSONUtil.toBean(shopJson, Shop.class);
+            return Result.ok(shop);
+        }
+
+        // 判断命中的是否是空值
+        if (shopJson != null) {
+            // 返回错误信息
+            return Result.fail("商铺不存在");
+        }
+
+        // 4. 不存在，根据 id 查询数据库
+        Shop shop = shopMapper.selectById(id);
+
+        // 5. 数据库中不存在，将空值写入 Redis
+        if (shop == null) {
+            stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+            return Result.fail("商铺不存在");
+        }
+
+        // 6. 存在，写入 Redis 并设置 30 分钟过期时间
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+
+        // 7. 返回
+        return Result.ok(shop);
+    }
+
+    @Override
+    @Transactional
+    public Result updateShop(Shop shop) {
+        Long id = shop.getId();
+        if (id == null) {
+            return Result.fail("店铺 id 不能为空");
+        }
+
+        // 1. 更新数据库
+        shopMapper.updateById(shop);
+
+        // 2. 删除缓存
+        String key = CACHE_SHOP_KEY + id;
+        stringRedisTemplate.delete(key);
+
+        return Result.ok();
+    }
+}
+```
+
+**关键改进点**：
+
+1. **空值缓存**：当数据库查询结果为 null 时，将空字符串 `""` 写入 Redis，TTL 设置为 2 分钟
+2. **空值判断**：使用 `StrUtil.isNotBlank()` 和 `shopJson != null` 两次判断
+   - `isNotBlank()` 返回 `true`：缓存命中且有数据，直接返回
+   - `isNotBlank()` 返回 `false` 但 `shopJson != null`：缓存命中但是空值，返回错误
+   - `shopJson == null`：缓存未命中，查询数据库
+3. **TTL 差异化**：正常数据 TTL 为 30 分钟，空值 TTL 为 2 分钟，避免数据新增后长时间无法查询
+4. **常量提取**：将空值 TTL 提取为常量 `CACHE_NULL_TTL`，便于维护
+
+::: tip 为什么用空字符串而不是 null
+Redis 的 `get()` 方法在 key 不存在时返回 null，无法区分"缓存未命中"和"缓存了 null 值"。因此使用空字符串 `""` 作为空值标记，通过 `isNotBlank()` 和 `!= null` 的组合判断来区分三种情况。
+:::
+
 ## 缓存雪崩
+
+### 问题描述
+
+缓存雪崩是指在同一时段大量的缓存 key 同时失效或者 Redis 服务宕机，导致大量请求瞬间直达数据库，给数据库带来巨大压力。
+
+![缓存雪崩](image-6.png)
+
+**常见场景**：
+- **大量 key 集中过期**：系统初始化或批量导入数据时，为大量 key 设置了相同的 TTL，导致同时失效
+- **Redis 服务宕机**：Redis 节点故障或网络问题导致整个缓存服务不可用
+- **缓存预热不当**：系统重启后未进行缓存预热，大量请求同时访问冷数据
+
+**危害**：
+- 数据库瞬间承受大量并发查询，可能直接宕机
+- 系统整体性能急剧下降，响应时间大幅增加
+- 可能引发连锁反应，导致整个系统雪崩
+
+### 解决方案
+
+| 方案 | 解决问题 | 实现原理 | 优点 | 缺点 | 实现难度 | 推荐程度 |
+|---|---|---|---|---|---|---|
+| **TTL 随机化** | key 集中过期 | 为不同的 key 设置不同的过期时间，在基础 TTL 上添加随机值 | 实现简单，成本低，有效防止 key 集中过期 | 只能解决 key 集中过期问题，无法应对服务宕机 | 低 | ⭐⭐⭐⭐⭐ 必须 |
+| **Redis 集群** | 服务宕机 | 采用主从+哨兵或 Redis Cluster 架构，实现高可用和故障自动转移 | 提高服务可用性，支持故障自动恢复，可实现读写分离和数据分片 | 部署和运维成本较高，架构相对复杂 | 中 | ⭐⭐⭐⭐⭐ 生产必备 |
+| **降级限流** | 数据库压力过大 | 通过服务降级返回默认值，使用 Sentinel/Hystrix 限流和熔断 | 保护数据库，防止系统崩溃，提供兜底保障 | 降级期间用户体验下降，需要额外开发降级逻辑 | 中 | ⭐⭐⭐⭐ 推荐 |
+| **多级缓存** | 单点依赖 | 构建浏览器、CDN、Nginx、进程内、Redis 等多层缓存体系 | 分散流量，降低单点依赖，提升整体性能 | 架构复杂，数据一致性难以保证，开发和维护成本高 | 高 | ⭐⭐⭐ 高并发场景 |
+
+#### TTL 随机化代码示例
+
+```java
+// 在基础 TTL 上添加随机值，避免大量 key 同时过期
+Long ttl = CACHE_SHOP_TTL + RandomUtil.randomLong(0, 5);
+stringRedisTemplate.opsForValue().set(key, value, ttl, TimeUnit.MINUTES);
+```
+
+::: tip 综合防护建议
+实际生产环境中，应组合使用多种方案：
+- **基础防护**：TTL 随机化（必须）
+- **高可用保障**：Redis 集群部署（必须）
+- **兜底机制**：降级限流策略（推荐）
+- **性能优化**：多级缓存（可选，视业务规模而定）
+:::
 
 ## 缓存击穿
 
