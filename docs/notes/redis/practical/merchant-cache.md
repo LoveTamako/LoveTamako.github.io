@@ -4,7 +4,7 @@
 
 缓存（cache）是数据交换的缓冲区，用于临时存储数据，通常具有较高的读写性能。
 
-![多级缓存架构](image.png)
+![多级缓存架构](practical.assets/merchant-cache-multilevel-architecture.png)
 
 从上图可以看到，在现代应用架构中，缓存被广泛应用于多个层级，包括浏览器缓存、CDN 缓存、Nginx 缓存、Tomcat 进程缓存、Redis 缓存以及数据库缓存等，形成了完整的多级缓存体系。
 
@@ -18,13 +18,13 @@
 
 ## 添加 Redis 缓存
 
-![缓存作用模型](image-1.png)
+![缓存作用模型](practical.assets/merchant-cache-redis-model.png)
 
 当客户端发起查询请求时，系统首先从 Redis 缓存中查找数据。若缓存命中则直接返回结果；若缓存未命中，再查询数据库并将结果写入缓存，以便后续请求快速获取。
 
 ### 实现方案
 
-![根据id查询商铺缓存的流程](image-2.png)
+![根据id查询商铺缓存的流程](practical.assets/merchant-cache-query-flow.png)
 
 根据 ID 查询商铺信息时，采用 Cache-Aside 模式：先查缓存，缓存命中则返回；缓存未命中则查数据库，查到后写入缓存并返回。
 
@@ -411,7 +411,7 @@ public class ShopServiceImpl implements ShopService {
 
 #### 缓存空对象方案
 
-![缓存空对象](image-3.png)
+![缓存空对象](practical.assets/merchant-cache-null-cache.png)
 
 当查询数据库返回 null 时，将空值缓存起来，下次相同请求直接返回空结果，避免重复查询数据库。
 
@@ -421,7 +421,7 @@ public class ShopServiceImpl implements ShopService {
 
 #### 布隆过滤器方案
 
-![布隆过滤](image-4.png)
+![布隆过滤](practical.assets/merchant-cache-bloom-filter.png)
 
 布隆过滤器是一种空间效率极高的概率型数据结构，用于判断元素是否在集合中。
 
@@ -439,7 +439,7 @@ public class ShopServiceImpl implements ShopService {
 
 对前面的[商铺查询方案](#实现方案)进行优化，采用缓存空对象的方式解决缓存穿透问题。
 
-![新流程](image-5.png)
+![新流程](practical.assets/merchant-cache-penetration-solution.png)
 
 #### 代码实现
 
@@ -533,7 +533,7 @@ Redis 的 `get()` 方法在 key 不存在时返回 null，无法区分"缓存未
 
 缓存雪崩是指在同一时段大量的缓存 key 同时失效或者 Redis 服务宕机，导致大量请求瞬间直达数据库，给数据库带来巨大压力。
 
-![缓存雪崩](image-6.png)
+![缓存雪崩](practical.assets/merchant-cache-avalanche.png)
 
 **常见场景**：
 - **大量 key 集中过期**：系统初始化或批量导入数据时，为大量 key 设置了相同的 TTL，导致同时失效
@@ -574,7 +574,7 @@ stringRedisTemplate.opsForValue().set(key, value, ttl, TimeUnit.MINUTES);
 
 缓存击穿也叫热点 key 问题，是指一个被**高并发访问**且**缓存重建业务较复杂**的 key 突然失效，导致大量请求瞬间直达数据库，给数据库带来巨大冲击。
 
-![重建缓存数据时间较长，导致有多个线程同时重建，冲击数据库](image-7.png)
+![重建缓存数据时间较长，导致有多个线程同时重建，冲击数据库](practical.assets/merchant-cache-hotkey-problem.png)
 
 **常见场景**：
 - 热门商品的详情页缓存过期，大量用户同时访问
@@ -611,7 +611,7 @@ stringRedisTemplate.opsForValue().set(key, value, ttl, TimeUnit.MINUTES);
 
 互斥锁方案通过分布式锁确保同一时刻只有一个线程能够重建缓存，其他线程等待缓存重建完成后直接使用。
 
-![互斥锁流程](image-8.png)
+![互斥锁流程](practical.assets/merchant-cache-mutex-flow.png)
 
 **核心思路**：
 1. 查询缓存，如果命中则直接返回
@@ -627,7 +627,7 @@ stringRedisTemplate.opsForValue().set(key, value, ttl, TimeUnit.MINUTES);
 
 逻辑过期方案不设置 Redis 的 TTL，而是在缓存值中额外存储一个逻辑过期时间字段。缓存过期后不删除，而是由独立线程异步重建，其他线程继续返回旧数据。
 
-![逻辑过期流程](image-9.png)
+![逻辑过期流程](practical.assets/merchant-cache-logical-expire-flow.png)
 
 **核心思路**：
 1. 查询缓存，如果未命中则说明是首次访问，需要缓存预热
@@ -645,7 +645,7 @@ stringRedisTemplate.opsForValue().set(key, value, ttl, TimeUnit.MINUTES);
 
 基于[商铺查询方案](#实现方案)，使用互斥锁方式解决缓存击穿问题。
 
-![互斥锁实现流程](image-10.png)
+![互斥锁实现流程](practical.assets/merchant-cache-mutex-implementation.png)
 
 #### 代码实现
 
@@ -811,7 +811,7 @@ public class ShopServiceImpl implements ShopService {
 
 基于[商铺查询方案](#实现方案)，使用逻辑过期方式解决缓存击穿问题。
 
-![逻辑过期实现流程](image-11.png)
+![逻辑过期实现流程](practical.assets/merchant-cache-logical-expire-implementation.png)
 
 #### 数据结构设计
 
