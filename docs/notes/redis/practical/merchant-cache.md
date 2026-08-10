@@ -383,8 +383,6 @@ public class ShopServiceImpl implements ShopService {
 
 ## 缓存穿透
 
-### 问题描述
-
 缓存穿透是指客户端请求的数据在缓存和数据库中都不存在，导致每次请求都会穿透缓存直接访问数据库。
 
 **常见场景**：
@@ -533,8 +531,6 @@ Redis 的 `get()` 方法在 key 不存在时返回 null，无法区分"缓存未
 
 ## 缓存雪崩
 
-### 问题描述
-
 缓存雪崩是指在同一时段大量的缓存 key 同时失效或者 Redis 服务宕机，导致大量请求瞬间直达数据库，给数据库带来巨大压力。
 
 ![缓存雪崩](image-6.png)
@@ -576,4 +572,1017 @@ stringRedisTemplate.opsForValue().set(key, value, ttl, TimeUnit.MINUTES);
 
 ## 缓存击穿
 
+缓存击穿也叫热点 key 问题，是指一个被**高并发访问**且**缓存重建业务较复杂**的 key 突然失效，导致大量请求瞬间直达数据库，给数据库带来巨大冲击。
+
+![重建缓存数据时间较长，导致有多个线程同时重建，冲击数据库](image-7.png)
+
+**常见场景**：
+- 热门商品的详情页缓存过期，大量用户同时访问
+- 秒杀活动的商品缓存失效，高并发查询直接打到数据库
+- 热点新闻或视频的缓存过期，流量瞬间涌入数据库
+
+**与缓存雪崩的区别**：
+- 缓存雪崩：大量 key 同时失效或服务宕机，影响范围广
+- 缓存击穿：单个热点 key 失效，但访问量极大，影响集中
+
+### 解决方案对比
+
+| 方案 | 实现原理 | 优点 | 缺点 | 适用场景 |
+|---|---|---|---|---|
+| **互斥锁** | 缓存失效时，只允许一个线程查询数据库并重建缓存，其他线程等待 | 实现简单，保证数据一致性，无额外内存消耗 | 线程需要等待，性能受影响，可能有死锁风险 | 一致性要求高，可以接受短暂等待的场景 |
+| **逻辑过期** | 不设置 TTL，而是在缓存值中存储逻辑过期时间，过期后不删除缓存，由独立线程异步重建 | 线程无需等待，性能好，可用性高 | 不保证强一致性，有额外内存消耗，实现复杂 | 对一致性要求不高，追求极致性能的场景 |
+
+::: tip CAP 权衡与选型建议
+
+**CAP 定理权衡**：
+
+在分布式系统中需要在一致性（Consistency）和可用性（Availability）之间做出取舍
+
+- **互斥锁方案**：牺牲部分可用性（线程等待），保证一致性
+- **逻辑过期方案**：牺牲强一致性（短期数据可能过期），保证可用性
+
+**选型建议**：
+- **强一致性场景**（金融、订单、库存等）：使用互斥锁方案
+- **弱一致性场景**（商品详情、新闻资讯、视频信息等）：使用逻辑过期方案
+- **一般业务场景**：互斥锁方案更简单实用，优先推荐
+:::
+
+#### 互斥锁方案流程
+
+互斥锁方案通过分布式锁确保同一时刻只有一个线程能够重建缓存，其他线程等待缓存重建完成后直接使用。
+
+![互斥锁流程](image-8.png)
+
+**核心思路**：
+1. 查询缓存，如果命中则直接返回
+2. 如果未命中，尝试获取互斥锁
+3. 获取锁成功：查询数据库，重建缓存，释放锁
+4. 获取锁失败：等待一段时间后重试，直到缓存重建完成
+
+::: tip 注意
+这里的锁不能使用 `synchronized` 等 JVM 锁（只能在单机生效），而应使用基于 Redis `SETNX` 命令实现的分布式锁，确保在集群环境下也能生效。
+:::
+
+#### 逻辑过期方案流程
+
+逻辑过期方案不设置 Redis 的 TTL，而是在缓存值中额外存储一个逻辑过期时间字段。缓存过期后不删除，而是由独立线程异步重建，其他线程继续返回旧数据。
+
+![逻辑过期流程](image-9.png)
+
+**核心思路**：
+1. 查询缓存，如果未命中则说明是首次访问，需要缓存预热
+2. 如果命中，检查逻辑过期时间：
+   - 未过期：直接返回数据
+   - 已过期：尝试获取互斥锁
+     - 获取成功：开启独立线程异步重建缓存，当前线程立即返回旧数据
+     - 获取失败：直接返回旧数据（说明其他线程正在重建）
+
+::: tip 注意
+逻辑过期方案需要提前进行缓存预热，否则首次访问时缓存不存在，无法返回数据。
+:::
+
+### 互斥锁方案实现
+
+基于[商铺查询方案](#实现方案)，使用互斥锁方式解决缓存击穿问题。
+
+![互斥锁实现流程](image-10.png)
+
+#### 代码实现
+
+**Service 层**
+
+```java
+@Service
+public class ShopServiceImpl implements ShopService {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private ShopMapper shopMapper;
+
+    private static final String CACHE_SHOP_KEY = "cache:shop:";
+    private static final String LOCK_SHOP_KEY = "lock:shop:";
+    private static final Long CACHE_SHOP_TTL = 30L;
+    private static final Long CACHE_NULL_TTL = 2L;
+    private static final Long LOCK_SHOP_TTL = 10L;
+
+    @Override
+    public Result queryById(Long id) {
+        // 使用互斥锁解决缓存击穿
+        Shop shop = queryWithMutex(id);
+        if (shop == null) {
+            return Result.fail("商铺不存在");
+        }
+        return Result.ok(shop);
+    }
+
+    /**
+     * 使用互斥锁解决缓存击穿
+     */
+    private Shop queryWithMutex(Long id) {
+        String key = CACHE_SHOP_KEY + id;
+
+        // 1. 从 Redis 查询商铺缓存
+        String shopJson = stringRedisTemplate.opsForValue().get(key);
+
+        // 2. 判断缓存是否存在
+        if (StrUtil.isNotBlank(shopJson)) {
+            // 3. 存在，直接返回
+            return JSONUtil.toBean(shopJson, Shop.class);
+        }
+
+        // 判断命中的是否是空值
+        if (shopJson != null) {
+            return null;
+        }
+
+        // 4. 实现缓存重建
+        // 4.1 获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        Shop shop = null;
+        try {
+            boolean isLock = tryLock(lockKey);
+
+            // 4.2 判断是否获取成功
+            if (!isLock) {
+                // 4.3 失败，则休眠并重试
+                Thread.sleep(50);
+                return queryWithMutex(id);
+            }
+
+            // 4.4 获取锁成功，DoubleCheck：再次检查缓存是否存在
+            shopJson = stringRedisTemplate.opsForValue().get(key);
+            if (StrUtil.isNotBlank(shopJson)) {
+                // 缓存已存在，说明其他线程已经重建完成，直接返回
+                return JSONUtil.toBean(shopJson, Shop.class);
+            }
+
+            // 4.5 缓存确实不存在，根据 id 查询数据库
+            shop = shopMapper.selectById(id);
+
+            // 模拟重建缓存的延迟
+            Thread.sleep(200);
+
+            // 5. 数据库中不存在，将空值写入 Redis
+            if (shop == null) {
+                stringRedisTemplate.opsForValue().set(key, "", CACHE_NULL_TTL, TimeUnit.MINUTES);
+                return null;
+            }
+
+            // 6. 存在，写入 Redis
+            stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shop), CACHE_SHOP_TTL, TimeUnit.MINUTES);
+
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            // 7. 释放互斥锁
+            unlock(lockKey);
+        }
+
+        // 8. 返回
+        return shop;
+    }
+
+    /**
+     * 尝试获取锁
+     */
+    private boolean tryLock(String key) {
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    /**
+     * 释放锁
+     */
+    private void unlock(String key) {
+        stringRedisTemplate.delete(key);
+    }
+
+    @Override
+    @Transactional
+    public Result updateShop(Shop shop) {
+        Long id = shop.getId();
+        if (id == null) {
+            return Result.fail("店铺 id 不能为空");
+        }
+
+        // 1. 更新数据库
+        shopMapper.updateById(shop);
+
+        // 2. 删除缓存
+        String key = CACHE_SHOP_KEY + id;
+        stringRedisTemplate.delete(key);
+
+        return Result.ok();
+    }
+}
+```
+
+**关键实现点**：
+
+1. **分布式锁实现**：使用 Redis 的 `SETNX` 命令（对应 `setIfAbsent` 方法）实现分布式锁
+   - Key：`lock:shop:{id}`，针对每个商铺 ID 单独加锁，避免锁粒度过大
+   - Value：简单标识值 `"1"`
+   - TTL：10 秒，防止死锁（如果持锁线程异常崩溃，锁会自动释放）
+
+2. **递归重试**：获取锁失败时，休眠 50ms 后递归调用自身重试，直到获取到锁或缓存重建完成
+
+3. **DoubleCheck**：获取锁成功后再次查询缓存，避免重复查询数据库
+   - 场景：线程 A 重建缓存完成释放锁后，线程 B 获取锁，此时缓存已存在
+
+4. **异常安全**：使用 `try-finally` 确保无论是否发生异常，锁都能被释放
+
+5. **防止自动拆箱 NPE**：使用 `BooleanUtil.isTrue()` 处理 `setIfAbsent` 返回的 `Boolean` 对象，避免自动拆箱时的空指针异常
+
+6. **模拟延迟**：代码中的 `Thread.sleep(200)` 用于模拟缓存重建的耗时，实际生产代码中应删除
+
+::: warning 改进空间
+当前实现是一个简化版的分布式锁，存在以下问题：
+- **锁误删问题**：线程 A 的锁过期后被自动释放，线程 B 获取锁，此时线程 A 执行 `unlock()` 会误删线程 B 的锁
+- **原子性问题**：`get` 和 `delete` 不是原子操作
+- **可重入问题**：不支持可重入
+- **重试机制**：递归可能导致栈溢出
+
+生产环境建议使用 Redisson 等成熟的分布式锁框架，或基于 Lua 脚本实现更可靠的锁机制。
+:::
+
+### 逻辑过期方案实现
+
+基于[商铺查询方案](#实现方案)，使用逻辑过期方式解决缓存击穿问题。
+
+![逻辑过期实现流程](image-11.png)
+
+#### 数据结构设计
+
+首先需要定义带有逻辑过期时间的数据结构：
+
+```java
+/**
+ * Redis 数据包装类，用于逻辑过期方案
+ */
+@Data
+public class RedisData {
+    /**
+     * 逻辑过期时间
+     */
+    private LocalDateTime expireTime;
+    
+    /**
+     * 实际数据（可以是任意类型）
+     */
+    private Object data;
+}
+```
+
+#### 代码实现
+
+**Service 层**
+
+```java
+@Service
+public class ShopServiceImpl implements ShopService {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private ShopMapper shopMapper;
+
+    private static final String CACHE_SHOP_KEY = "cache:shop:";
+    private static final String LOCK_SHOP_KEY = "lock:shop:";
+    private static final Long CACHE_SHOP_TTL = 30L;
+    private static final Long LOCK_SHOP_TTL = 10L;
+
+    // 线程池，用于异步重建缓存
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
+    @Override
+    public Result queryById(Long id) {
+        // 使用逻辑过期解决缓存击穿
+        Shop shop = queryWithLogicalExpire(id);
+        if (shop == null) {
+            return Result.fail("商铺不存在");
+        }
+        return Result.ok(shop);
+    }
+
+    /**
+     * 使用逻辑过期解决缓存击穿
+     */
+    private Shop queryWithLogicalExpire(Long id) {
+        String key = CACHE_SHOP_KEY + id;
+
+        // 1. 从 Redis 查询商铺缓存
+        String redisDataJson = stringRedisTemplate.opsForValue().get(key);
+
+        // 2. 判断缓存是否存在
+        if (StrUtil.isBlank(redisDataJson)) {
+            // 3. 不存在，直接返回 null（需要提前做缓存预热）
+            return null;
+        }
+
+        // 4. 命中，需要先把 JSON 反序列化为对象
+        RedisData redisData = JSONUtil.toBean(redisDataJson, RedisData.class);
+        Shop shop = JSONUtil.toBean((JSONObject) redisData.getData(), Shop.class);
+        LocalDateTime expireTime = redisData.getExpireTime();
+
+        // 5. 判断是否过期
+        if (expireTime.isAfter(LocalDateTime.now())) {
+            // 5.1 未过期，直接返回店铺信息
+            return shop;
+        }
+
+        // 5.2 已过期，需要缓存重建
+        // 6. 缓存重建
+        // 6.1 获取互斥锁
+        String lockKey = LOCK_SHOP_KEY + id;
+        boolean isLock = tryLock(lockKey);
+
+        // 6.2 判断是否获取锁成功
+        if (isLock) {
+            // 6.3 成功，开启独立线程，实现缓存重建
+            CACHE_REBUILD_EXECUTOR.submit(() -> {
+                try {
+                    // DoubleCheck：再次检查缓存是否已过期
+                    String checkJson = stringRedisTemplate.opsForValue().get(key);
+                    if (StrUtil.isNotBlank(checkJson)) {
+                        RedisData checkData = JSONUtil.toBean(checkJson, RedisData.class);
+                        if (checkData.getExpireTime().isAfter(LocalDateTime.now())) {
+                            // 缓存已被其他线程重建且未过期，无需重建
+                            return;
+                        }
+                    }
+                    
+                    // 重建缓存（这里设置 20 分钟的逻辑过期时间）
+                    this.saveShop2Redis(id, 20L);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    // 释放锁
+                    unlock(lockKey);
+                }
+            });
+        }
+
+        // 6.4 返回过期的商铺信息
+        return shop;
+    }
+
+    /**
+     * 将商铺数据保存到 Redis，并设置逻辑过期时间
+     */
+    public void saveShop2Redis(Long id, Long expireSeconds) throws InterruptedException {
+        // 1. 查询店铺数据
+        Shop shop = shopMapper.selectById(id);
+
+        // 模拟缓存重建的延迟
+        Thread.sleep(200);
+
+        // 2. 封装逻辑过期时间
+        RedisData redisData = new RedisData();
+        redisData.setData(shop);
+        redisData.setExpireTime(LocalDateTime.now().plusSeconds(expireSeconds));
+
+        // 3. 写入 Redis（不设置 TTL）
+        stringRedisTemplate.opsForValue().set(CACHE_SHOP_KEY + id, JSONUtil.toJsonStr(redisData));
+    }
+
+    /**
+     * 尝试获取锁
+     */
+    private boolean tryLock(String key) {
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", LOCK_SHOP_TTL, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    /**
+     * 释放锁
+     */
+    private void unlock(String key) {
+        stringRedisTemplate.delete(key);
+    }
+
+    @Override
+    @Transactional
+    public Result updateShop(Shop shop) {
+        Long id = shop.getId();
+        if (id == null) {
+            return Result.fail("店铺 id 不能为空");
+        }
+
+        // 1. 更新数据库
+        shopMapper.updateById(shop);
+
+        // 2. 删除缓存
+        String key = CACHE_SHOP_KEY + id;
+        stringRedisTemplate.delete(key);
+
+        return Result.ok();
+    }
+}
+```
+
+**关键实现点**：
+
+1. **RedisData 包装类**：将实际数据和逻辑过期时间封装在一起存储到 Redis
+   - `data` 字段：存储实际的业务数据（这里是 Shop 对象）
+   - `expireTime` 字段：存储逻辑过期时间
+
+2. **不设置 TTL**：调用 `set()` 时不传递过期时间参数，数据永不过期，完全由逻辑过期时间控制
+
+3. **线程池异步重建**：使用独立的线程池异步执行缓存重建任务，当前请求立即返回旧数据
+   - 避免阻塞用户请求
+   - 控制并发重建的线程数量（这里设置为 10）
+
+4. **互斥锁控制**：虽然允许返回过期数据，但缓存重建仍需要互斥锁控制
+   - 避免多个线程同时重建缓存，浪费资源
+   - 获取锁失败的线程直接返回过期数据（不等待）
+
+5. **缓存预热必要性**：逻辑过期方案要求数据必须提前加载到缓存
+   - 如果缓存不存在，直接返回 null
+   - 可通过定时任务或系统启动时批量加载热点数据
+
+6. **JSON 反序列化处理**：由于 `RedisData.data` 是 `Object` 类型，反序列化时需要两步
+   - 第一步：将 JSON 字符串转为 `RedisData` 对象
+   - 第二步：将 `data` 字段（JSONObject 类型）转为具体的 `Shop` 对象
+
+**缓存预热示例**：
+
+```java
+/**
+ * 系统启动时预热热点商铺数据
+ */
+@PostConstruct
+public void init() {
+    // 假设 ID 为 1 的商铺是热点数据
+    try {
+        this.saveShop2Redis(1L, 30 * 60L); // 设置 30 分钟逻辑过期时间
+    } catch (Exception e) {
+        log.error("缓存预热失败", e);
+    }
+}
+```
+
+::: warning 逻辑过期方案注意事项
+1. **线程池资源管理**：需要合理设置线程池大小，避免资源耗尽，建议根据实际 QPS 和重建耗时进行压测调优
+2. **缓存预热策略**：需要识别热点数据并提前加载到缓存，可通过访问日志分析、运营配置等方式确定
+3. **监控告警**：监控缓存命中率、重建耗时、线程池队列长度等指标，及时发现问题
+4. **优雅停机**：应用关闭时需要等待异步重建任务完成或中断，避免数据丢失
+:::
+
+#### 测试建议
+
+可以使用 JMeter 等工具进行压测，对比两种方案的性能差异：
+
+1. **并发场景**：模拟 1000 个并发请求访问同一个刚过期的热点 key
+2. **观察指标**：
+   - 响应时间（RT）
+   - 吞吐量（TPS）
+   - 数据库查询次数
+   - 缓存重建次数
+
+预期结果：
+- 互斥锁方案：RT 较高，TPS 较低，但只有 1 次数据库查询
+- 逻辑过期方案：RT 很低，TPS 很高，只有 1 次数据库查询，但部分请求返回旧数据
+
 ## 缓存工具封装
+
+前面我们分别实现了缓存穿透和缓存击穿的解决方案，但这些代码都分散在各个 Service 层中，不便于复用。现在将这些通用逻辑封装成一个缓存工具类，提高代码复用性和可维护性。
+
+### 工具类需求
+
+基于 `StringRedisTemplate` 封装一个缓存工具类 `CacheClient`，提供以下功能：
+
+| 方法 | 功能说明 | 解决的问题 |
+|---|---|---|
+| `set` | 将任意 Java 对象序列化为 JSON 并存储在 String 类型的 key 中，可设置 TTL 过期时间 | 基础缓存功能 |
+| `setWithLogicalExpire` | 将任意 Java 对象序列化为 JSON 并存储在 String 类型的 key 中，可设置逻辑过期时间 | 缓存击穿（逻辑过期方案） |
+| `queryWithPassThrough` | 根据指定的 key 查询缓存并反序列化为指定类型，利用缓存空值的方式解决缓存穿透问题 | 缓存穿透 |
+| `queryWithLogicalExpire` | 根据指定的 key 查询缓存并反序列化为指定类型，利用逻辑过期解决缓存击穿问题 | 缓存击穿（逻辑过期方案） |
+| `queryWithMutex` | 根据指定的 key 查询缓存并反序列化为指定类型，利用互斥锁解决缓存击穿问题 | 缓存击穿（互斥锁方案） |
+
+### 完整代码实现
+
+#### RedisData 数据结构
+
+```java
+/**
+ * Redis 数据包装类，用于逻辑过期方案
+ */
+@Data
+public class RedisData {
+    /**
+     * 逻辑过期时间
+     */
+    private LocalDateTime expireTime;
+    
+    /**
+     * 实际数据（可以是任意类型）
+     */
+    private Object data;
+}
+```
+
+#### CacheClient 工具类
+
+```java
+import cn.hutool.core.util.BooleanUtil;
+import cn.hutool.core.util.StrUtil;
+import cn.hutool.json.JSONObject;
+import cn.hutool.json.JSONUtil;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.stereotype.Component;
+
+import java.time.LocalDateTime;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+
+/**
+ * Redis 缓存工具类
+ * 封装了常见的缓存操作，解决缓存穿透、缓存击穿等问题
+ */
+@Slf4j
+@Component
+public class CacheClient {
+
+    private final StringRedisTemplate stringRedisTemplate;
+
+    // 线程池，用于异步重建缓存
+    private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
+    public CacheClient(StringRedisTemplate stringRedisTemplate) {
+        this.stringRedisTemplate = stringRedisTemplate;
+    }
+
+    /**
+     * 方法1：将任意 Java 对象序列化为 JSON 并存储在 String 类型的 key 中，并设置 TTL 过期时间
+     *
+     * @param key   Redis key
+     * @param value 要缓存的对象
+     * @param time  过期时间
+     * @param unit  时间单位
+     */
+    public void set(String key, Object value, Long time, TimeUnit unit) {
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+    }
+
+    /**
+     * 方法2：将任意 Java 对象序列化为 JSON 并存储在 String 类型的 key 中，并设置逻辑过期时间
+     * 用于处理缓存击穿问题（逻辑过期方案）
+     *
+     * @param key   Redis key
+     * @param value 要缓存的对象
+     * @param time  逻辑过期时间
+     * @param unit  时间单位
+     */
+    public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {
+        // 设置逻辑过期
+        RedisData redisData = new RedisData();
+        redisData.setData(value);
+        redisData.setExpireTime(LocalDateTime.now().plusSeconds(unit.toSeconds(time)));
+        // 写入 Redis，不设置 TTL
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(redisData));
+    }
+
+    /**
+     * 方法3：根据指定的 key 查询缓存，并反序列化为指定类型
+     * 利用缓存空值的方式解决缓存穿透问题
+     *
+     * @param keyPrefix  key 前缀
+     * @param id         数据 id
+     * @param type       返回值类型
+     * @param dbFallback 查询数据库的函数（缓存未命中时调用）
+     * @param time       缓存过期时间
+     * @param unit       时间单位
+     * @param <R>        返回值类型
+     * @param <ID>       id 类型
+     * @return 查询结果
+     */
+    public <R, ID> R queryWithPassThrough(
+            String keyPrefix, ID id, Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time, TimeUnit unit) {
+
+        String key = keyPrefix + id;
+
+        // 1. 从 Redis 查询缓存
+        String json = stringRedisTemplate.opsForValue().get(key);
+
+        // 2. 判断是否存在
+        if (StrUtil.isNotBlank(json)) {
+            // 3. 存在，直接返回
+            return JSONUtil.toBean(json, type);
+        }
+
+        // 判断命中的是否是空值
+        if (json != null) {
+            // 返回错误信息
+            return null;
+        }
+
+        // 4. 不存在，根据 id 查询数据库
+        R r = dbFallback.apply(id);
+
+        // 5. 数据库中不存在，将空值写入 Redis
+        if (r == null) {
+            stringRedisTemplate.opsForValue().set(key, "", RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES);
+            return null;
+        }
+
+        // 6. 存在，写入 Redis
+        this.set(key, r, time, unit);
+
+        // 7. 返回
+        return r;
+    }
+
+    /**
+     * 方法4：根据指定的 key 查询缓存，并反序列化为指定类型
+     * 利用逻辑过期解决缓存击穿问题
+     *
+     * @param keyPrefix  key 前缀
+     * @param id         数据 id
+     * @param type       返回值类型
+     * @param dbFallback 查询数据库的函数（缓存重建时调用）
+     * @param time       逻辑过期时间
+     * @param unit       时间单位
+     * @param <R>        返回值类型
+     * @param <ID>       id 类型
+     * @return 查询结果
+     */
+    public <R, ID> R queryWithLogicalExpire(
+            String keyPrefix, ID id, Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time, TimeUnit unit) {
+
+        String key = keyPrefix + id;
+
+        // 1. 从 Redis 查询缓存
+        String json = stringRedisTemplate.opsForValue().get(key);
+
+        // 2. 判断是否存在
+        if (StrUtil.isBlank(json)) {
+            // 3. 不存在，直接返回 null
+            return null;
+        }
+
+        // 4. 命中，需要先把 JSON 反序列化为对象
+        RedisData redisData = JSONUtil.toBean(json, RedisData.class);
+        R r = JSONUtil.toBean((JSONObject) redisData.getData(), type);
+        LocalDateTime expireTime = redisData.getExpireTime();
+
+        // 5. 判断是否过期
+        if (expireTime.isAfter(LocalDateTime.now())) {
+            // 5.1 未过期，直接返回店铺信息
+            return r;
+        }
+
+        // 5.2 已过期，需要缓存重建
+        // 6. 缓存重建
+        String lockKey = RedisConstants.LOCK_SHOP_KEY + id;
+        // 6.1 获取互斥锁
+        boolean isLock = tryLock(lockKey);
+
+        // 6.2 判断是否获取锁成功
+        if (isLock) {
+            // 6.3 成功，开启独立线程，实现缓存重建
+            CACHE_REBUILD_EXECUTOR.submit(() -> {
+                try {
+                    // DoubleCheck：再次检查缓存是否已过期
+                    String checkJson = stringRedisTemplate.opsForValue().get(key);
+                    if (StrUtil.isNotBlank(checkJson)) {
+                        RedisData checkData = JSONUtil.toBean(checkJson, RedisData.class);
+                        if (checkData.getExpireTime().isAfter(LocalDateTime.now())) {
+                            // 缓存已被其他线程重建且未过期，无需重建
+                            return;
+                        }
+                    }
+
+                    // 查询数据库
+                    R newR = dbFallback.apply(id);
+                    // 重建缓存
+                    this.setWithLogicalExpire(key, newR, time, unit);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    // 释放锁
+                    unlock(lockKey);
+                }
+            });
+        }
+
+        // 6.4 返回过期的商铺信息
+        return r;
+    }
+
+    /**
+     * 方法5（额外补充）：根据指定的 key 查询缓存，并反序列化为指定类型
+     * 利用互斥锁解决缓存击穿问题
+     *
+     * @param keyPrefix  key 前缀
+     * @param id         数据 id
+     * @param type       返回值类型
+     * @param dbFallback 查询数据库的函数（缓存未命中时调用）
+     * @param time       缓存过期时间
+     * @param unit       时间单位
+     * @param <R>        返回值类型
+     * @param <ID>       id 类型
+     * @return 查询结果
+     */
+    public <R, ID> R queryWithMutex(
+            String keyPrefix, ID id, Class<R> type,
+            Function<ID, R> dbFallback,
+            Long time, TimeUnit unit) {
+
+        String key = keyPrefix + id;
+
+        // 1. 从 Redis 查询缓存
+        String json = stringRedisTemplate.opsForValue().get(key);
+
+        // 2. 判断是否存在
+        if (StrUtil.isNotBlank(json)) {
+            // 3. 存在，直接返回
+            return JSONUtil.toBean(json, type);
+        }
+
+        // 判断命中的是否是空值
+        if (json != null) {
+            return null;
+        }
+
+        // 4. 实现缓存重建
+        String lockKey = RedisConstants.LOCK_SHOP_KEY + id;
+        R r = null;
+        try {
+            // 4.1 获取互斥锁
+            boolean isLock = tryLock(lockKey);
+
+            // 4.2 判断是否获取成功
+            if (!isLock) {
+                // 4.3 失败，则休眠并重试
+                Thread.sleep(50);
+                return queryWithMutex(keyPrefix, id, type, dbFallback, time, unit);
+            }
+
+            // 4.4 获取锁成功，DoubleCheck：再次检查缓存是否存在
+            json = stringRedisTemplate.opsForValue().get(key);
+            if (StrUtil.isNotBlank(json)) {
+                // 缓存已存在，说明其他线程已经重建完成，直接返回
+                return JSONUtil.toBean(json, type);
+            }
+
+            // 4.5 缓存确实不存在，根据 id 查询数据库
+            r = dbFallback.apply(id);
+
+            // 5. 数据库中不存在，将空值写入 Redis
+            if (r == null) {
+                stringRedisTemplate.opsForValue().set(key, "", RedisConstants.CACHE_NULL_TTL, TimeUnit.MINUTES);
+                return null;
+            }
+
+            // 6. 存在，写入 Redis
+            this.set(key, r, time, unit);
+
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } finally {
+            // 7. 释放互斥锁
+            unlock(lockKey);
+        }
+
+        // 8. 返回
+        return r;
+    }
+
+    /**
+     * 尝试获取锁
+     *
+     * @param key 锁的 key
+     * @return 是否获取成功
+     */
+    private boolean tryLock(String key) {
+        Boolean flag = stringRedisTemplate.opsForValue()
+                .setIfAbsent(key, "1", RedisConstants.LOCK_SHOP_TTL, TimeUnit.SECONDS);
+        return BooleanUtil.isTrue(flag);
+    }
+
+    /**
+     * 释放锁
+     *
+     * @param key 锁的 key
+     */
+    private void unlock(String key) {
+        stringRedisTemplate.delete(key);
+    }
+}
+```
+
+#### RedisConstants 常量类
+
+```java
+/**
+ * Redis 相关常量
+ */
+public class RedisConstants {
+    public static final String CACHE_SHOP_KEY = "cache:shop:";
+    public static final Long CACHE_SHOP_TTL = 30L;
+    public static final Long CACHE_NULL_TTL = 2L;
+
+    public static final String LOCK_SHOP_KEY = "lock:shop:";
+    public static final Long LOCK_SHOP_TTL = 10L;
+}
+```
+
+### 使用示例
+
+#### 原始代码（Service 层）
+
+```java
+@Service
+public class ShopServiceImpl implements ShopService {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private ShopMapper shopMapper;
+
+    @Override
+    public Result queryById(Long id) {
+        // 大量重复的缓存逻辑代码...
+    }
+}
+```
+
+#### 使用工具类后（重构后）
+
+```java
+@Service
+public class ShopServiceImpl implements ShopService {
+
+    @Resource
+    private CacheClient cacheClient;
+
+    @Resource
+    private ShopMapper shopMapper;
+
+    @Override
+    public Result queryById(Long id) {
+        // 使用缓存空值解决缓存穿透
+        Shop shop = cacheClient.queryWithPassThrough(
+                RedisConstants.CACHE_SHOP_KEY, id, Shop.class,
+                this::getById, // 方法引用，等价于 id2 -> shopMapper.selectById(id2)
+                RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES
+        );
+
+        if (shop == null) {
+            return Result.fail("商铺不存在");
+        }
+        return Result.ok(shop);
+    }
+
+    /**
+     * 根据 id 查询数据库
+     */
+    public Shop getById(Long id) {
+        return shopMapper.selectById(id);
+    }
+
+    @Override
+    @Transactional
+    public Result updateShop(Shop shop) {
+        Long id = shop.getId();
+        if (id == null) {
+            return Result.fail("店铺 id 不能为空");
+        }
+
+        // 1. 更新数据库
+        shopMapper.updateById(shop);
+
+        // 2. 删除缓存
+        String key = RedisConstants.CACHE_SHOP_KEY + id;
+        stringRedisTemplate.delete(key);
+
+        return Result.ok();
+    }
+}
+```
+
+### 关键设计说明
+
+#### 1. 泛型设计
+
+```java
+public <R, ID> R queryWithPassThrough(...)
+```
+
+- `R`：返回值类型（如 `Shop`、`User` 等任意类型）
+- `ID`：主键类型（如 `Long`、`String` 等）
+- 使用泛型使工具类可以支持任意实体类型
+
+#### 2. 函数式编程
+
+```java
+Function<ID, R> dbFallback
+```
+
+- `Function` 是 Java 8 的函数式接口，表示一个接受一个参数并返回结果的函数
+- `dbFallback` 是查询数据库的回调函数，由调用方传入
+- 好处：工具类不需要关心具体的数据库查询逻辑，只负责缓存处理
+
+**使用示例**：
+```java
+// Lambda 表达式
+id -> shopMapper.selectById(id)
+
+// 方法引用（更简洁）
+this::getById
+```
+
+#### 3. 单一职责原则
+
+每个方法只负责一个特定的缓存场景：
+- `queryWithPassThrough`：解决缓存穿透
+- `queryWithMutex`：解决缓存击穿（互斥锁方案）
+- `queryWithLogicalExpire`：解决缓存击穿（逻辑过期方案）
+
+#### 4. 常量统一管理
+
+将所有 Redis 相关的常量提取到 `RedisConstants` 类中，便于维护和修改。
+
+### 工具类的优势
+
+| 对比项 | 未封装前 | 封装后 |
+|---|---|---|
+| **代码重复** | 每个 Service 都有相同的缓存逻辑 | 缓存逻辑集中在工具类中 |
+| **可维护性** | 修改缓存策略需要改多处代码 | 只需修改工具类即可 |
+| **可测试性** | Service 层逻辑复杂，难以测试 | 缓存逻辑独立，易于单元测试 |
+| **代码量** | Service 层代码臃肿 | Service 层代码简洁清晰 |
+| **扩展性** | 新增实体需要重写缓存逻辑 | 直接调用工具类方法即可 |
+
+::: tip 最佳实践
+1. **方法命名清晰**：从方法名就能看出解决的是什么问题（`queryWithPassThrough`、`queryWithMutex`）
+2. **参数设计合理**：使用泛型和函数式接口，提高通用性
+3. **注释完整**：每个方法都有清晰的 JavaDoc 注释
+4. **常量统一管理**：避免硬编码，便于配置调整
+5. **线程安全**：互斥锁和线程池的正确使用
+:::
+
+## 总结
+
+本文系统介绍了 Redis 缓存在商户查询场景中的完整应用方案，从基础的缓存读写到生产级的缓存问题解决方案，涵盖了以下核心内容：
+
+### 核心要点回顾
+
+**1. 缓存更新策略**
+- 推荐使用 **Cache Aside 模式 + 先更新数据库再删除缓存** 的方案
+- 配合 TTL 超时删除作为兜底机制，保证最终一致性
+- 设置随机 TTL 避免大量 key 同时过期
+
+**2. 三大缓存问题及解决方案**
+
+在 Cache Aside 模式下的查询操作中，可能会遇到以下三种典型问题：
+
+| 问题 | 现象 | 推荐方案 | 适用场景 |
+|---|---|---|---|
+| **缓存穿透** | 查询不存在的数据，缓存无法拦截 | 缓存空对象（实现简单）<br/>布隆过滤器（内存优化） | 一般业务用缓存空对象<br/>海量数据用布隆过滤器 |
+| **缓存雪崩** | 大量 key 同时失效或服务宕机 | TTL 随机化 + Redis 集群 + 降级限流 | 所有生产环境必备 |
+| **缓存击穿** | 热点 key 失效，高并发冲击数据库 | 互斥锁（保证一致性）<br/>逻辑过期（保证性能） | 强一致性用互斥锁<br/>高并发用逻辑过期 |
+
+**3. 工具类封装**
+
+通过 `CacheClient` 工具类封装通用缓存逻辑，提供：
+- `queryWithPassThrough`：解决缓存穿透
+- `queryWithMutex`：解决缓存击穿（互斥锁）
+- `queryWithLogicalExpire`：解决缓存击穿（逻辑过期）
+- `set` / `setWithLogicalExpire`：缓存写入
+
+使用泛型和函数式编程提高代码复用性，遵循单一职责原则，便于维护和测试。
+
+### 实践建议
+
+1. **分层防护**：组合使用多种方案，构建纵深防御体系
+   - 基础层：TTL 随机化、缓存空对象
+   - 高可用层：Redis 集群、主从复制
+   - 保护层：限流降级、熔断机制
+
+2. **性能优化**：根据业务特点选择合适的方案
+   - 一般查询：互斥锁方案（实现简单，一致性好）
+   - 热点数据：逻辑过期方案（性能优先，允许短暂不一致）
+
+3. **监控告警**：建立完善的监控体系
+   - 缓存命中率、响应时间、数据库压力
+   - 缓存重建次数、锁等待时间
+   - 异常流量识别与告警
+
+4. **代码规范**：
+   - 常量统一管理（key 前缀、TTL 时间）
+   - 使用工具类封装通用逻辑
+   - 完善的异常处理和日志记录
+
+通过本文的方案，可以构建一个高性能、高可用、高一致性的 Redis 缓存系统，有效应对生产环境中的各种缓存问题。
+
