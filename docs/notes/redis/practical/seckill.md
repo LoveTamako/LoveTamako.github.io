@@ -197,6 +197,137 @@ void testIdWorker() throws InterruptedException {
 
 ## 实现优惠券秒杀下单
 
+### 业务场景
+
+每个店铺都可以发布优惠券，用户可通过优惠券享受相应的折扣或满减优惠。
+
+**优惠券类型：**
+
+- **平价券**：无库存限制，用户可随时购买
+- **特价券**：限量发放，需要秒杀抢购，具有时间限制和库存限制
+
+### 数据表设计
+
+**tb_voucher（优惠券基础表）：**
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| id | bigint | 优惠券 ID（主键） |
+| shop_id | bigint | 店铺 ID |
+| title | varchar | 优惠券标题 |
+| sub_title | varchar | 优惠券副标题 |
+| rules | varchar | 使用规则 |
+| pay_value | bigint | 支付金额（单位：分） |
+| actual_value | bigint | 抵扣金额（单位：分） |
+| type | tinyint | 优惠券类型（0:平价券 1:特价券） |
+| status | tinyint | 状态（1:上架 2:下架 3:过期） |
+| create_time | timestamp | 创建时间 |
+| update_time | timestamp | 更新时间 |
+
+**tb_seckill_voucher（秒杀券扩展表）：**
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| voucher_id | bigint | 关联的优惠券 ID（主键） |
+| stock | int | 库存数量 |
+| begin_time | timestamp | 秒杀开始时间 |
+| end_time | timestamp | 秒杀结束时间 |
+| create_time | timestamp | 创建时间 |
+| update_time | timestamp | 更新时间 |
+
+:::tip 表设计说明
+特价券的秒杀相关信息（库存、时间限制）单独存储在 `tb_seckill_voucher` 表中，通过 `voucher_id` 与 `tb_voucher` 表关联。这种设计可以避免在基础表中存储大量空值，提高查询效率。
+:::
+
+### 添加秒杀券接口
+
+**接口功能：**
+
+提供 RESTful API 接口，用于商家发布秒杀优惠券，同时将优惠券基本信息和秒杀信息分别保存到对应的数据表中。
+
+**接口基本信息：**
+
+| 项目 | 内容 |
+|------|------|
+| 请求方式 | POST |
+| 请求路径 | `/voucher-order/seckill` |
+| 请求参数 | Voucher 对象（JSON 格式） |
+| 返回结果 | Result 对象（包含优惠券 ID） |
+
+**Controller 实现：**
+
+```java
+@RestController
+@RequestMapping("/voucher-order")
+public class VoucherOrderController {
+
+    @Resource
+    private IVoucherService voucherService;
+
+    /**
+     * 新增秒杀券
+     * @param voucher 优惠券信息（包含秒杀信息）
+     * @return 优惠券ID
+     */
+    @PostMapping("/seckill")
+    public Result addSeckillVoucher(@RequestBody Voucher voucher) {
+        voucherService.addSeckillVoucher(voucher);
+        return Result.ok(voucher.getId());
+    }
+}
+```
+
+**Service 实现：**
+
+```java
+@Service
+public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher>
+        implements IVoucherService {
+
+    @Resource
+    private ISeckillVoucherService seckillVoucherService;
+
+    @Override
+    @Transactional
+    public void addSeckillVoucher(Voucher voucher) {
+        // 1. 保存优惠券基本信息
+        save(voucher);
+
+        // 2. 保存秒杀券扩展信息
+        SeckillVoucher seckillVoucher = new SeckillVoucher();
+        seckillVoucher.setVoucherId(voucher.getId());
+        seckillVoucher.setStock(voucher.getStock());
+        seckillVoucher.setBeginTime(voucher.getBeginTime());
+        seckillVoucher.setEndTime(voucher.getEndTime());
+        seckillVoucherService.save(seckillVoucher);
+    }
+}
+```
+
+**核心逻辑：**
+
+1. **事务保证**：使用 `@Transactional` 注解保证两张表的数据一致性
+2. **分表存储**：优惠券基本信息存入 `tb_voucher`，秒杀信息存入 `tb_seckill_voucher`
+3. **关联关系**：通过 `voucher_id` 建立两表之间的关联
+
+**请求示例：**
+
+```json
+POST /voucher-order/seckill
+{
+    "shopId": 1,
+    "title": "100元代金券",
+    "subTitle": "周一至周五可用",
+    "rules": "全场通用",
+    "payValue": 8000,
+    "actualValue": 10000,
+    "type": 1,
+    "stock": 100,
+    "beginTime": "2024-08-13 10:00:00",
+    "endTime": "2024-08-13 18:00:00"
+}
+```
+
 ## 超卖问题
 
 ## 一人一单
