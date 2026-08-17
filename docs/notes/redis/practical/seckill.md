@@ -344,6 +344,8 @@ POST /voucher-order/seckill
 
 **业务流程：**
 
+<span id="秒杀下单流程图"></span>
+
 ![秒杀下单流程](image.png)
 
 **接口基本信息：**
@@ -694,6 +696,357 @@ WHERE voucher_id = ? AND stock > 0
 通过数据库的原子性更新操作，确保了库存扣减的线程安全，彻底解决了超卖问题。
 
 ## 一人一单
+
+### 业务需求与优化流程
+
+在当前的秒杀业务中，虽然通过乐观锁解决了超卖问题，但仍然存在一个业务漏洞：**同一个用户可以重复购买同一张优惠券**。
+
+**新增业务规则：** 同一个优惠券，一个用户只能下一单。
+
+**优化方案：** 在[秒杀下单流程](#秒杀下单流程图)的基础上，增加"一人一单"校验，在扣减库存之前先查询该用户是否已经购买过该优惠券。
+
+<span id="一人一单流程图"></span>
+
+![一人一单优化流程图](image-1.png)
+
+### 初版实现（有问题）
+
+**代码实现：**
+
+```java
+@Override
+@Transactional
+public Result seckillVoucher(Long voucherId) {
+    // 1. 查询秒杀券信息
+    SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+
+    // 2. 判断秒杀是否开始
+    if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        return Result.fail("秒杀尚未开始！");
+    }
+
+    // 3. 判断秒杀是否结束
+    if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
+        return Result.fail("秒杀已经结束！");
+    }
+
+    // 4. 判断库存是否充足
+    if (voucher.getStock() < 1) {
+        return Result.fail("库存不足！");
+    }
+
+    // 5. 一人一单校验：查询订单
+    Long userId = UserHolder.getUser().getId();
+    int count = query().eq("user_id", userId)
+                       .eq("voucher_id", voucherId)
+                       .count();
+
+    // 6. 判断是否已经购买过
+    if (count > 0) {
+        return Result.fail("您已经购买过该优惠券了！");
+    }
+
+    // 7. 扣减库存（乐观锁）
+    boolean success = seckillVoucherService.update()
+            .setSql("stock = stock - 1")
+            .eq("voucher_id", voucherId)
+            .gt("stock", 0)
+            .update();
+
+    if (!success) {
+        return Result.fail("库存不足！");
+    }
+
+    // 8. 创建订单
+    VoucherOrder order = new VoucherOrder();
+    long orderId = redisIdWorker.nextId("order");
+    order.setId(orderId);
+    order.setUserId(userId);
+    order.setVoucherId(voucherId);
+
+    // 9. 保存订单
+    save(order);
+
+    // 10. 返回订单ID
+    return Result.ok(orderId);
+}
+```
+
+**问题分析：**
+
+经过高并发测试，发现同一个用户仍然可以下多单。问题原因与超卖问题类似，是**多线程并发导致的竞态条件**：
+
+| 时间点 | 线程 1（用户 A） | 线程 2（用户 A） | 数据库订单数 |
+|-------|---------------|---------------|------------|
+| T1 | 查询订单 count = 0 | - | 0 |
+| T2 | - | 查询订单 count = 0 | 0 |
+| T3 | 判断未购买 ✓ | - | 0 |
+| T4 | - | 判断未购买 ✓ | 0 |
+| T5 | 创建订单 | - | 1 |
+| T6 | - | 创建订单 | **2（违反一人一单）** |
+
+**问题核心：** 在"查询订单"和"创建订单"之间存在时间窗口，同一用户的多个请求可能同时通过校验。
+
+### 悲观锁解决方案
+
+#### 方案选型：为什么选择悲观锁？
+
+一人一单问题有三种可选方案，下面对比分析为什么选择悲观锁：
+
+**方案对比：**
+
+| 方案 | 实现方式 | 优点 | 缺点 | 是否可行 |
+|------|---------|------|------|---------|
+| **乐观锁** | CAS 判断（如 `WHERE stock > 0`） | 性能高，无阻塞 | 需要可用于比较的数值字段 | ✗ 不适用 |
+| **唯一索引** | 数据库唯一约束 `(user_id, voucher_id)` | 数据库层面保证唯一性 | 并发时抛异常，需要异常处理 | ✓ 可行但不优雅 |
+| **悲观锁** | `synchronized` 或分布式锁 | 实现简单，逻辑清晰 | 有阻塞，性能略低 | ✓ 推荐 |
+
+**详细分析：**
+
+1. **乐观锁不适用的原因**
+
+   - **超卖问题**：纯粹的 **UPDATE 操作**，可以在 SQL 层面通过 `WHERE stock > 0` 实现原子性的判断和更新
+
+   - **一人一单问题**：涉及 **SELECT（查询是否购买）+ INSERT（创建订单）** 两个操作，无法在单条 SQL 中原子性完成
+
+   - 没有类似 `stock` 这样可用于 CAS 的数值字段来判断"是否已购买"
+
+2. **唯一索引的局限性**
+
+   虽然可以在 `tb_voucher_order` 表上建立 `(user_id, voucher_id)` 的唯一索引，让数据库保证唯一性：
+
+   ```sql
+   ALTER TABLE tb_voucher_order
+   ADD UNIQUE KEY uk_user_voucher (user_id, voucher_id);
+   ```
+
+   **问题：**
+   - 并发插入时，后续请求会抛出 `DuplicateKeyException`
+   - 需要在代码中 `try-catch` 捕获并处理异常
+   - 用异常处理业务逻辑不够优雅，影响代码可读性和性能
+   - 异常栈的生成和处理有额外开销
+
+3. **悲观锁的优势**
+
+   使用 `synchronized` 悲观锁是最直接有效的方案：
+   - 逻辑清晰：先查询后插入，符合业务直觉
+   - 代码优雅：无需异常处理，正常的 if-else 逻辑
+   - 细粒度锁：只锁定同一用户，不同用户并发不受影响
+   - 易于理解和维护
+
+#### 代码实现
+
+将创建订单的逻辑抽取为独立方法，使用 `synchronized` 加锁：
+
+**Service 实现：**
+
+```java
+@Override
+@Transactional
+public Result seckillVoucher(Long voucherId) {
+    // 1. 查询秒杀券信息
+    SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+
+    // 2. 判断秒杀是否开始
+    if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        return Result.fail("秒杀尚未开始！");
+    }
+
+    // 3. 判断秒杀是否结束
+    if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
+        return Result.fail("秒杀已经结束！");
+    }
+
+    // 4. 判断库存是否充足
+    if (voucher.getStock() < 1) {
+        return Result.fail("库存不足！");
+    }
+
+    // 5. 一人一单逻辑（加锁）
+    Long userId = UserHolder.getUser().getId();
+    synchronized (userId.toString().intern()) {
+        // 获取代理对象（事务）
+        IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+        return proxy.createVoucherOrder(voucherId);
+    }
+}
+
+/**
+ * 创建优惠券订单（需要事务支持）
+ */
+@Transactional
+public Result createVoucherOrder(Long voucherId) {
+    // 1. 一人一单校验
+    Long userId = UserHolder.getUser().getId();
+    int count = query().eq("user_id", userId)
+                       .eq("voucher_id", voucherId)
+                       .count();
+
+    if (count > 0) {
+        return Result.fail("您已经购买过该优惠券了！");
+    }
+
+    // 2. 扣减库存（乐观锁）
+    boolean success = seckillVoucherService.update()
+            .setSql("stock = stock - 1")
+            .eq("voucher_id", voucherId)
+            .gt("stock", 0)
+            .update();
+
+    if (!success) {
+        return Result.fail("库存不足！");
+    }
+
+    // 3. 创建订单
+    VoucherOrder order = new VoucherOrder();
+    long orderId = redisIdWorker.nextId("order");
+    order.setId(orderId);
+    order.setUserId(userId);
+    order.setVoucherId(voucherId);
+
+    // 4. 保存订单
+    save(order);
+
+    // 5. 返回订单ID
+    return Result.ok(orderId);
+}
+```
+
+**核心要点：**
+
+1. **方法抽取**
+   - `seckillVoucher()`：主流程，负责基础校验和加锁
+   - `createVoucherOrder()`：创建订单逻辑，负责一人一单校验、扣减库存、创建订单
+
+2. **事务问题**
+   - `synchronized` 加锁的代码中调用了 `createVoucherOrder()` 方法
+   - 由于 Spring 事务是基于 AOP 代理实现的，直接调用 `this.createVoucherOrder()` 会导致事务失效
+   - 必须通过 `AopContext.currentProxy()` 获取代理对象，然后调用代理对象的方法
+
+3. **锁和事务的位置关系（关键）**
+
+:::danger 为什么锁必须在事务外部？
+
+如果将 `@Transactional` 注解加在包含 `synchronized` 的方法上，会导致严重的并发安全问题。
+
+**错误示例（锁在事务内部）：**
+
+```java
+@Transactional  // 事务在最外层
+public Result seckillVoucher(Long voucherId) {
+    // ... 基础校验 ...
+
+    Long userId = UserHolder.getUser().getId();
+    synchronized (userId.toString().intern()) {  // 锁在事务内部
+        // 一人一单校验 + 创建订单
+    }
+    // 锁已释放，但事务尚未提交！
+}  // 事务在此处提交
+```
+
+**问题分析：**
+
+| 时间点 | 线程 1（用户 A） | 线程 2（用户 A） | 数据库订单数 | 说明 |
+|-------|---------------|---------------|------------|------|
+| T1 | 获取锁 A ✓ | - | 0 | 线程 1 进入同步代码块 |
+| T2 | 查询订单 count = 0 | 等待锁 A | 0 | 线程 1 查询，线程 2 阻塞 |
+| T3 | 创建订单（未提交） | 等待锁 A | 0 | 线程 1 创建订单但事务未提交 |
+| T4 | **释放锁 A** | 获取锁 A ✓ | 0 | 线程 1 离开同步块，释放锁 |
+| T5 | 事务尚未提交 | 查询订单 count = 0 | 0 | **问题：线程 2 查不到线程 1 的订单！** |
+| T6 | 事务尚未提交 | 创建订单（未提交） | 0 | 线程 2 也创建了订单 |
+| T7 | 事务提交 ✓ | 事务提交 ✓ | **2** | 两个订单都提交成功，违反一人一单！ |
+
+**问题核心：** 锁的释放早于事务的提交。线程 1 释放锁后，线程 2 获取锁并查询订单，但此时线程 1 的事务还未提交，数据库中还没有订单记录，导致线程 2 也通过了校验。
+
+**正确做法（锁在事务外部）：**
+
+```java
+public Result seckillVoucher(Long voucherId) {  // 无事务
+    // ... 基础校验 ...
+
+    Long userId = UserHolder.getUser().getId();
+    synchronized (userId.toString().intern()) {  // 锁在最外层
+        // 调用有事务的方法
+        IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+        return proxy.createVoucherOrder(voucherId);  // 事务在此方法内
+    }  // 事务提交后才释放锁
+}
+
+@Transactional
+public Result createVoucherOrder(Long voucherId) {
+    // 一人一单校验 + 创建订单
+}
+```
+
+**执行时序：**
+
+| 时间点 | 线程 1（用户 A） | 线程 2（用户 A） | 数据库订单数 | 说明 |
+|-------|---------------|---------------|------------|------|
+| T1 | 获取锁 A ✓ | - | 0 | 线程 1 进入同步代码块 |
+| T2 | 查询订单 count = 0 | 等待锁 A | 0 | 线程 1 查询，线程 2 阻塞 |
+| T3 | 创建订单（未提交） | 等待锁 A | 0 | 线程 1 创建订单但事务未提交 |
+| T4 | **事务提交 ✓** | 等待锁 A | 1 | 线程 1 事务提交 |
+| T5 | **释放锁 A** | 获取锁 A ✓ | 1 | 线程 1 离开同步块，释放锁 |
+| T6 | - | 查询订单 count = 1 | 1 | 线程 2 查到了线程 1 的订单 |
+| T7 | - | 返回失败 ✗ | 1 | 线程 2 校验失败，保证一人一单 ✓ |
+
+**关键点：** 锁的作用范围必须覆盖整个事务，确保事务提交后才释放锁，让后续线程能查询到已提交的数据。
+
+:::
+
+4. **启用 AOP 代理暴露**
+
+需要在启动类添加注解：
+
+```java
+@EnableAspectJAutoProxy(exposeProxy = true)
+@SpringBootApplication
+public class Application {
+    public static void main(String[] args) {
+        SpringApplication.run(Application.class, args);
+    }
+}
+```
+
+4. **添加依赖**
+
+```xml
+<dependency>
+    <groupId>org.aspectj</groupId>
+    <artifactId>aspectjweaver</artifactId>
+</dependency>
+```
+
+**核心改动说明：**
+
+1. **锁对象选择：`userId.toString().intern()`**
+   - `Long` 类型的对象，即使值相同，每次获取也可能是不同的对象实例
+   - `synchronized` 锁的是对象引用，不同实例无法互斥
+   - `toString()` 将 Long 转为 String，`intern()` 将字符串放入字符串常量池
+   - 确保相同用户 ID 的所有请求锁的是同一个对象
+
+2. **锁的粒度**
+   - 只锁定同一个用户的请求，不同用户之间不互斥
+   - 性能优于全局锁（锁整个方法）
+
+**并发执行示例：**
+
+| 时间点 | 线程 1（用户 A） | 线程 2（用户 A） | 线程 3（用户 B） | 结果 |
+|-------|---------------|---------------|---------------|------|
+| T1 | 获取锁 A ✓ | - | 获取锁 B ✓ | - |
+| T2 | 查询订单 | 等待锁 A | 查询订单 | 线程 2 被阻塞 |
+| T3 | 创建订单 | 等待锁 A | 创建订单 | 线程 1、3 并发执行 |
+| T4 | 释放锁 A | 获取锁 A ✓ | 释放锁 B | - |
+| T5 | - | 查询订单（已存在） | - | - |
+| T6 | - | 返回失败 ✗ | - | 保证一人一单 |
+
+**结果验证：**
+- 用户 A 的两个并发请求：只有第一个成功，第二个被阻塞后查询到已存在订单，返回失败
+- 用户 B 的请求：不受用户 A 的锁影响，可以正常下单
+
+:::warning 注意事项
+此方案使用 `synchronized` 只能解决单机环境下的一人一单问题。在分布式环境（多台服务器）下，需要使用分布式锁（如 Redis 分布式锁）来解决，详见下一章节。
+:::
 
 ## 分布式锁
 
