@@ -328,7 +328,370 @@ POST /voucher-order/seckill
 }
 ```
 
+### 秒杀下单接口
+
+**接口功能：**
+
+用户抢购秒杀券时，需要校验秒杀时间和库存，并完成下单操作。
+
+**业务规则：**
+
+| 规则 | 说明 |
+|------|------|
+| 时间校验 | 秒杀尚未开始或已经结束时，无法下单 |
+| 库存校验 | 库存不足时，无法下单 |
+| 订单生成 | 校验通过后，扣减库存并生成订单 |
+
+**业务流程：**
+
+![秒杀下单流程](image.png)
+
+**接口基本信息：**
+
+| 项目 | 内容 |
+|------|------|
+| 请求方式 | POST |
+| 请求路径 | `/voucher-order/seckill/{voucherId}` |
+| 请求参数 | voucherId（路径参数） |
+| 返回结果 | Result 对象（包含订单 ID） |
+
+**Controller 实现：**
+
+```java
+@RestController
+@RequestMapping("/voucher-order")
+public class VoucherOrderController {
+
+    @Resource
+    private IVoucherOrderService voucherOrderService;
+
+    /**
+     * 秒杀下单
+     * @param voucherId 优惠券ID
+     * @return 订单ID
+     */
+    @PostMapping("/seckill/{voucherId}")
+    public Result seckillVoucher(@PathVariable("voucherId") Long voucherId) {
+        return voucherOrderService.seckillVoucher(voucherId);
+    }
+}
+```
+
+**Service 实现：**
+
+```java
+@Service
+public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, VoucherOrder>
+        implements IVoucherOrderService {
+
+    @Resource
+    private ISeckillVoucherService seckillVoucherService;
+
+    @Resource
+    private RedisIdWorker redisIdWorker;
+
+    @Override
+    @Transactional
+    public Result seckillVoucher(Long voucherId) {
+        // 1. 查询秒杀券信息
+        SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+
+        // 2. 判断秒杀是否开始
+        if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
+            return Result.fail("秒杀尚未开始！");
+        }
+
+        // 3. 判断秒杀是否结束
+        if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
+            return Result.fail("秒杀已经结束！");
+        }
+
+        // 4. 判断库存是否充足
+        if (voucher.getStock() < 1) {
+            return Result.fail("库存不足！");
+        }
+
+        // 5. 扣减库存
+        boolean success = seckillVoucherService.update()
+                .setSql("stock = stock - 1")
+                .eq("voucher_id", voucherId)
+                .update();
+
+        if (!success) {
+            return Result.fail("库存不足！");
+        }
+
+        // 6. 创建订单
+        VoucherOrder order = new VoucherOrder();
+        // 6.1 生成订单ID
+        long orderId = redisIdWorker.nextId("order");
+        order.setId(orderId);
+        // 6.2 设置用户ID
+        Long userId = UserHolder.getUser().getId();
+        order.setUserId(userId);
+        // 6.3 设置优惠券ID
+        order.setVoucherId(voucherId);
+
+        // 7. 保存订单
+        save(order);
+
+        // 8. 返回订单ID
+        return Result.ok(orderId);
+    }
+}
+```
+
+**核心实现细节：**
+
+1. **时间校验**
+   - 使用 `LocalDateTime.now()` 获取当前时间
+   - 通过 `isAfter()` 和 `isBefore()` 方法判断是否在秒杀时间范围内
+
+2. **库存扣减**
+   - 使用 `setSql("stock = stock - 1")` 直接在数据库层面扣减库存
+   - 避免先查询后更新导致的并发问题（此处仍存在超卖问题，后续章节解决）
+
+3. **订单生成**
+   - 使用 `RedisIdWorker` 生成全局唯一订单 ID
+   - 从 ThreadLocal 中获取当前登录用户信息
+   - 使用 `@Transactional` 保证订单创建和库存扣减的原子性
+
 ## 超卖问题
+
+### 问题现象
+
+使用 JMeter 对[秒杀下单接口](#秒杀下单接口)进行高并发测试时，会发现库存为 100 的秒杀券最终生成了超过 100 个订单，出现了**超卖问题**。
+
+:::danger 超卖问题的严重性
+在电商系统中，少卖（库存剩余但无法购买）虽然会影响用户体验，但超卖（实际库存不足却售出）会导致商家无法履约，造成资金损失和法律纠纷，是绝对不能容忍的问题。
+:::
+
+### 问题分析
+
+超卖问题的根本原因是**多线程并发导致的竞态条件**。以库存为 100 的秒杀券为例：
+
+| 时间点 | 线程 1 | 线程 2 | 数据库库存 |
+|-------|--------|--------|-----------|
+| T1 | 查询库存 = 1 | - | 1 |
+| T2 | - | 查询库存 = 1 | 1 |
+| T3 | 判断库存充足 ✓ | - | 1 |
+| T4 | - | 判断库存充足 ✓ | 1 |
+| T5 | 扣减库存 stock = 0 | - | 0 |
+| T6 | - | 扣减库存 stock = -1 | **-1（超卖）** |
+
+**问题核心：** 在"查询库存"和"扣减库存"之间存在时间窗口，多个线程可能同时通过库存校验，导致实际扣减次数超过库存数量。
+
+### 解决方案对比
+
+针对超卖问题，常见的解决方案是**加锁**，但锁的类型不同，性能和实现方式也不同：
+
+| 锁类型 | 核心思想 | 实现方式 | 优点 | 缺点 |
+|--------|---------|---------|------|------|
+| **悲观锁** | 认为并发冲突一定会发生，操作前先加锁 | `synchronized`、`Lock`、`SELECT FOR UPDATE` | 实现简单，数据一致性强 | 性能较低，串行执行 |
+| **乐观锁** | 认为并发冲突不一定发生，更新时判断是否被修改 | 版本号法、CAS | 性能高，无锁等待 | 可能重试，实现稍复杂 |
+
+### 乐观锁实现方式
+
+乐观锁的关键是**判断数据是否被其他线程修改过**，常见实现方式：
+
+#### 1. 版本号法
+
+在数据表中增加 `version` 字段，每次更新时版本号自增：
+
+```sql
+-- 查询时获取版本号
+SELECT id, stock, version FROM tb_seckill_voucher WHERE voucher_id = 1
+
+-- 更新时校验版本号
+UPDATE tb_seckill_voucher
+SET stock = stock - 1, version = version + 1
+WHERE voucher_id = 1 AND version = 10
+```
+
+**优点：** 可以解决 ABA 问题（数据被修改后又改回原值）
+
+**缺点：** 需要修改表结构，增加 `version` 字段
+
+#### 2. CAS（Compare And Swap）法
+
+利用原始值进行比较，只有值未变化时才执行更新：
+
+```sql
+-- 查询时获取库存
+SELECT stock FROM tb_seckill_voucher WHERE voucher_id = 1  -- 假设查到 stock = 100
+
+-- 更新时校验库存未被修改
+UPDATE tb_seckill_voucher
+SET stock = stock - 1
+WHERE voucher_id = 1 AND stock = 100  -- 要求库存必须还是 100
+```
+
+**优点：** 无需修改表结构，实现简单
+
+**缺点：** 在高并发场景下成功率极低
+
+**失败场景分析：**
+
+假设有 100 个线程同时抢购，初始库存为 100：
+
+| 时间 | 线程 1 | 线程 2 | 线程 3 | ... | 线程 100 | 数据库库存 |
+|------|--------|--------|--------|-----|----------|-----------|
+| T1 | 查询 stock = 100 | 查询 stock = 100 | 查询 stock = 100 | ... | 查询 stock = 100 | 100 |
+| T2 | `WHERE stock = 100` ✓ | `WHERE stock = 100` ✗ | `WHERE stock = 100` ✗ | ... | `WHERE stock = 100` ✗ | 99 |
+| T3 | 更新成功 | 更新失败（stock 已变为 99） | 更新失败 | ... | 更新失败 | 99 |
+
+**问题本质：** 严格的 CAS 判断（`stock = 100`）导致只有第一个线程能成功，其他 99 个线程因为库存值已改变而全部失败。即使库存还有 99 件，也无法继续售卖。
+
+**实际影响：**
+- 理论库存：100 件
+- 实际成功订单：可能只有 1 件（极端情况）
+- 性能浪费：大量线程失败后重试，造成数据库压力激增
+- 用户体验：明明有库存却无法下单，出现"假性售罄"
+
+### 乐观锁解决超卖
+
+#### 优化思路
+
+将 CAS 的判断条件从"库存值相等"改为"库存大于 0"，只要有库存就允许扣减：
+
+```sql
+-- 原始 CAS（有问题）
+UPDATE tb_seckill_voucher
+SET stock = stock - 1
+WHERE voucher_id = 1 AND stock = 100  -- 必须等于查询时的值
+
+-- 优化后的 CAS（推荐）
+UPDATE tb_seckill_voucher
+SET stock = stock - 1
+WHERE voucher_id = 1 AND stock > 0    -- 只要大于 0 即可
+```
+
+#### 为什么要改成 `stock > 0`？
+
+**问题对比：**
+
+| 判断条件 | 并发场景表现 | 库存利用率 | 是否解决超卖 | 是否解决并发性能 |
+|---------|-------------|-----------|------------|---------------|
+| `stock = 100` | 第一个线程成功后，其他线程全部失败 | 极低（1%） | ✓ 解决 | ✗ 性能差 |
+| `stock > 0` | 只要有库存，所有线程都有机会成功 | 100% | ✓ 解决 | ✓ 性能好 |
+
+**关键原因：**
+
+1. **不关心具体值，只关心是否有库存**
+   - 秒杀场景下，我们的目标是"防止库存扣成负数"，而不是"防止库存被修改"
+   - `stock = 100` 是典型的 CAS 思维（值没变才更新），但在库存扣减场景下过于严格
+   - `stock > 0` 才是业务真正需要的条件（有货就能卖）
+
+2. **避免无谓的失败**
+   ```
+   严格 CAS：库存从 100 → 99 后，其他线程更新失败（明明还有 99 件）
+   优化 CAS：库存从 100 → 99 → 98 → ... → 1 → 0，每个线程都有机会成功
+   ```
+
+3. **数据库原子性保证安全**
+   - SQL 的 `UPDATE` 语句本身是原子操作
+   - 数据库会在执行时加行锁，确保 `WHERE stock > 0` 的判断和 `stock - 1` 的更新是原子的
+   - 多个线程同时执行时，数据库保证串行执行，不会出现超卖
+
+**并发执行示例：**
+
+假设初始库存为 2，有 3 个线程并发请求：
+
+| 时间 | 线程 1 | 线程 2 | 线程 3 | 数据库库存 |
+|------|--------|--------|--------|-----------|
+| T1 | 查询 stock = 2 | 查询 stock = 2 | 查询 stock = 2 | 2 |
+| T2 | `WHERE stock > 0` ✓ | - | - | 1 |
+| T3 | - | `WHERE stock > 0` ✓ | - | 0 |
+| T4 | - | - | `WHERE stock > 0` ✗ | 0 |
+
+**结果：**
+- 线程 1、2 成功下单（库存充足）
+- 线程 3 失败（库存为 0，条件不满足）
+- 最终库存：0（不会出现 -1）
+
+:::tip 核心要点
+`stock > 0` 既保证了**线程安全**（不会超卖），又保证了**高并发性能**（不会因为值变化而全部失败），是秒杀场景下的最佳实践。
+:::
+
+**代码实现：**
+
+```java
+@Override
+@Transactional
+public Result seckillVoucher(Long voucherId) {
+    // 1. 查询秒杀券信息
+    SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+
+    // 2. 判断秒杀是否开始
+    if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        return Result.fail("秒杀尚未开始！");
+    }
+
+    // 3. 判断秒杀是否结束
+    if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
+        return Result.fail("秒杀已经结束！");
+    }
+
+    // 4. 判断库存是否充足
+    if (voucher.getStock() < 1) {
+        return Result.fail("库存不足！");
+    }
+
+    // 5. 扣减库存（乐观锁：只在库存大于 0 时扣减）
+    boolean success = seckillVoucherService.update()
+            .setSql("stock = stock - 1")
+            .eq("voucher_id", voucherId)
+            .gt("stock", 0)  // 添加乐观锁条件：stock > 0
+            .update();
+
+    if (!success) {
+        return Result.fail("库存不足！");
+    }
+
+    // 6. 创建订单
+    VoucherOrder order = new VoucherOrder();
+    long orderId = redisIdWorker.nextId("order");
+    order.setId(orderId);
+    order.setUserId(UserHolder.getUser().getId());
+    order.setVoucherId(voucherId);
+
+    // 7. 保存订单
+    save(order);
+
+    // 8. 返回订单ID
+    return Result.ok(orderId);
+}
+```
+
+**核心改动：**
+
+```java
+// 修改前（会超卖）
+.eq("voucher_id", voucherId)
+
+// 修改后（乐观锁）
+.eq("voucher_id", voucherId)
+.gt("stock", 0)  // 只在库存大于 0 时才允许扣减
+```
+
+**执行的 SQL：**
+
+```sql
+UPDATE tb_seckill_voucher
+SET stock = stock - 1
+WHERE voucher_id = ? AND stock > 0
+```
+
+**原理分析：**
+
+| 时间点 | 线程 1 | 线程 2 | 数据库库存 |
+|-------|--------|--------|-----------|
+| T1 | 查询库存 = 1 | - | 1 |
+| T2 | - | 查询库存 = 1 | 1 |
+| T3 | 执行 `UPDATE ... WHERE stock > 0` ✓ | - | 0 |
+| T4 | - | 执行 `UPDATE ... WHERE stock > 0` ✗ | 0（条件不满足，更新失败） |
+
+通过数据库的原子性更新操作，确保了库存扣减的线程安全，彻底解决了超卖问题。
 
 ## 一人一单
 
