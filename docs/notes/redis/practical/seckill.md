@@ -912,93 +912,73 @@ public Result createVoucherOrder(Long voucherId) {
 }
 ```
 
-**核心要点：**
+**实现要点：锁和事务的位置关系**
 
-1. **方法抽取**
-   - `seckillVoucher()`：主流程，负责基础校验和加锁
-   - `createVoucherOrder()`：创建订单逻辑，负责一人一单校验、扣减库存、创建订单
+**核心原则：锁必须包裹事务，而不是事务包裹锁。**
 
-2. **事务问题**
-   - `synchronized` 加锁的代码中调用了 `createVoucherOrder()` 方法
-   - 由于 Spring 事务是基于 AOP 代理实现的，直接调用 `this.createVoucherOrder()` 会导致事务失效
-   - 必须通过 `AopContext.currentProxy()` 获取代理对象，然后调用代理对象的方法
-
-3. **锁和事务的位置关系（关键）**
-
-:::danger 为什么锁必须在事务外部？
-
-如果将 `@Transactional` 注解加在包含 `synchronized` 的方法上，会导致严重的并发安全问题。
-
-**错误示例（锁在事务内部）：**
+**❌ 错误示例：事务包裹锁**
 
 ```java
-@Transactional  // 事务在最外层
+@Transactional  // ✗ 事务在外层
 public Result seckillVoucher(Long voucherId) {
-    // ... 基础校验 ...
-
-    Long userId = UserHolder.getUser().getId();
-    synchronized (userId.toString().intern()) {  // 锁在事务内部
-        // 一人一单校验 + 创建订单
-    }
-    // 锁已释放，但事务尚未提交！
-}  // 事务在此处提交
+    synchronized (userId.toString().intern()) {  // ✗ 锁在内层
+        // 校验 + 创建订单
+    }  // ← 锁释放了，但事务还未提交！
+}
 ```
 
 **问题分析：**
 
-| 时间点 | 线程 1（用户 A） | 线程 2（用户 A） | 数据库订单数 | 说明 |
-|-------|---------------|---------------|------------|------|
-| T1 | 获取锁 A ✓ | - | 0 | 线程 1 进入同步代码块 |
-| T2 | 查询订单 count = 0 | 等待锁 A | 0 | 线程 1 查询，线程 2 阻塞 |
-| T3 | 创建订单（未提交） | 等待锁 A | 0 | 线程 1 创建订单但事务未提交 |
-| T4 | **释放锁 A** | 获取锁 A ✓ | 0 | 线程 1 离开同步块，释放锁 |
-| T5 | 事务尚未提交 | 查询订单 count = 0 | 0 | **问题：线程 2 查不到线程 1 的订单！** |
-| T6 | 事务尚未提交 | 创建订单（未提交） | 0 | 线程 2 也创建了订单 |
-| T7 | 事务提交 ✓ | 事务提交 ✓ | **2** | 两个订单都提交成功，违反一人一单！ |
+| 时间点 | 线程 1 | 线程 2 | 数据库 | 问题 |
+|-------|-------|-------|--------|------|
+| T1 | 获取锁，查询订单=0 | 等待锁 | 0 | - |
+| T2 | 创建订单，释放锁 | 获取锁 | 0 | 事务未提交，线程2查不到 |
+| T3 | 事务提交 | 查询订单=0，创建订单 | 1 → 2 | **违反一人一单** |
 
-**问题核心：** 锁的释放早于事务的提交。线程 1 释放锁后，线程 2 获取锁并查询订单，但此时线程 1 的事务还未提交，数据库中还没有订单记录，导致线程 2 也通过了校验。
-
-**正确做法（锁在事务外部）：**
+**✅ 正确示例：锁包裹事务**
 
 ```java
-public Result seckillVoucher(Long voucherId) {  // 无事务
-    // ... 基础校验 ...
-
-    Long userId = UserHolder.getUser().getId();
-    synchronized (userId.toString().intern()) {  // 锁在最外层
-        // 调用有事务的方法
+public Result seckillVoucher(Long voucherId) {  // ✓ 无事务
+    synchronized (userId.toString().intern()) {  // ✓ 锁在外层
+        // 获取代理对象（解决事务失效问题）
         IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
-        return proxy.createVoucherOrder(voucherId);  // 事务在此方法内
-    }  // 事务提交后才释放锁
+        return proxy.createVoucherOrder(voucherId);  // ✓ 事务在内层
+    }  // ← 事务提交后才释放锁
 }
 
 @Transactional
 public Result createVoucherOrder(Long voucherId) {
-    // 一人一单校验 + 创建订单
+    // 校验 + 创建订单
 }
 ```
 
-**执行时序：**
+**执行流程：**
 
-| 时间点 | 线程 1（用户 A） | 线程 2（用户 A） | 数据库订单数 | 说明 |
-|-------|---------------|---------------|------------|------|
-| T1 | 获取锁 A ✓ | - | 0 | 线程 1 进入同步代码块 |
-| T2 | 查询订单 count = 0 | 等待锁 A | 0 | 线程 1 查询，线程 2 阻塞 |
-| T3 | 创建订单（未提交） | 等待锁 A | 0 | 线程 1 创建订单但事务未提交 |
-| T4 | **事务提交 ✓** | 等待锁 A | 1 | 线程 1 事务提交 |
-| T5 | **释放锁 A** | 获取锁 A ✓ | 1 | 线程 1 离开同步块，释放锁 |
-| T6 | - | 查询订单 count = 1 | 1 | 线程 2 查到了线程 1 的订单 |
-| T7 | - | 返回失败 ✗ | 1 | 线程 2 校验失败，保证一人一单 ✓ |
+| 时间点 | 线程 1 | 线程 2 | 数据库 | 结果 |
+|-------|-------|-------|--------|------|
+| T1 | 获取锁，查询订单=0 | 等待锁 | 0 | - |
+| T2 | 创建订单，事务提交 | 等待锁 | 1 | 线程2仍在等待 |
+| T3 | 释放锁 | 获取锁，查询订单=1 | 1 | **查到已存在订单** |
+| T4 | - | 返回失败 | 1 | ✓ 保证一人一单 |
 
-**关键点：** 锁的作用范围必须覆盖整个事务，确保事务提交后才释放锁，让后续线程能查询到已提交的数据。
+**实现说明：**
 
-:::
+1. **锁对象选择**：使用 `userId.toString().intern()` 作为锁对象
+   - `Long` 类型的对象，即使值相同，每次获取也可能是不同的对象实例
+   - `synchronized` 锁的是对象引用，不同实例无法互斥
+   - `toString()` 将 Long 转为 String，`intern()` 将字符串放入字符串常量池
+   - 确保相同用户 ID 的所有请求锁的是同一个对象
 
-4. **启用 AOP 代理暴露**
+2. **锁的粒度**：只锁定同一个用户的请求，不同用户之间不互斥，性能优于全局锁（锁整个方法）
 
-需要在启动类添加注解：
+3. **代理对象调用**：由于 Spring 事务基于 AOP 代理实现，直接调用 `this.createVoucherOrder()` 会导致事务失效，必须通过 `AopContext.currentProxy()` 获取代理对象后调用。
+
+4. **锁的范围**：锁必须覆盖整个事务生命周期，确保事务提交后才释放锁，后续线程才能读取到已提交的数据。
+
+**相关配置：**
 
 ```java
+// 启动类添加注解，启用代理暴露功能
 @EnableAspectJAutoProxy(exposeProxy = true)
 @SpringBootApplication
 public class Application {
@@ -1008,26 +988,15 @@ public class Application {
 }
 ```
 
-4. **添加依赖**
-
 ```xml
+<!-- 添加 AspectJ 依赖 -->
 <dependency>
     <groupId>org.aspectj</groupId>
     <artifactId>aspectjweaver</artifactId>
 </dependency>
 ```
 
-**核心改动说明：**
 
-1. **锁对象选择：`userId.toString().intern()`**
-   - `Long` 类型的对象，即使值相同，每次获取也可能是不同的对象实例
-   - `synchronized` 锁的是对象引用，不同实例无法互斥
-   - `toString()` 将 Long 转为 String，`intern()` 将字符串放入字符串常量池
-   - 确保相同用户 ID 的所有请求锁的是同一个对象
-
-2. **锁的粒度**
-   - 只锁定同一个用户的请求，不同用户之间不互斥
-   - 性能优于全局锁（锁整个方法）
 
 **并发执行示例：**
 
