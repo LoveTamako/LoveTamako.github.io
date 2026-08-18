@@ -1038,6 +1038,123 @@ public class Application {
 
 ## 分布式锁
 
+分布式锁是满足分布式系统或集群模式下**多进程可见**并且**互斥**的锁机制。
+
+**核心特性：**
+- **多进程可见**：不同服务器、不同 JVM 进程都能识别同一把锁
+- **互斥性**：同一时刻只有一个进程能获取锁
+- **高可用**：锁服务本身要有高可用性保障
+- **高性能**：加锁解锁操作要足够快，不能成为系统瓶颈
+
+### 常见的分布式锁实现方案
+
+| 实现方案 | MySQL | Redis | Zookeeper |
+|---------|-------|-------|-----------|
+| **互斥实现** | 利用 MySQL 本身的互斥锁机制 | 利用 `SETNX` 等互斥命令 | 利用节点的唯一性和有序性实现互斥 |
+| **高可用** | 好 | 好 | 好 |
+| **高性能** | 一般 | 好 | 一般 |
+| **安全性** | 断开连接自动释放锁 | 利用过期时间自动释放 | 临时节点断开连接自动释放 |
+| **适用场景** | 已有 MySQL，锁竞争不激烈 | 高并发场景（推荐） | 需要强一致性保证 |
+
+**方案选择建议：**
+- **Redis**：性能最优，适合高并发秒杀等场景（本项目采用）
+- **Zookeeper**：强一致性，适合对数据一致性要求极高的场景
+- **MySQL**：实现简单，适合已有 MySQL 且并发量不大的场景
+
+### 基于 Redis 的分布式锁
+
+#### 核心接口设计
+
+实现分布式锁需要定义两个基本方法：
+
+**1. 获取锁（tryLock）**
+
+- **互斥性**：确保同一时刻只有一个线程能获取锁
+- **非阻塞**：尝试一次即返回结果，成功返回 `true`，失败返回 `false`
+  - 非阻塞式：获取失败立即返回，由业务层决定是重试、降级还是返回失败
+  - 阻塞式：获取失败后线程会一直等待，直到获取成功或超时（实现复杂，需要额外的等待队列和通知机制）
+
+Redis 实现：
+```bash
+# lock: 锁的 key
+# thread1: 锁的持有者标识（线程或进程 ID）
+# NX: 只在 key 不存在时设置（保证互斥）
+# EX 10: 设置过期时间为 10 秒（防止死锁）
+# 原子性：SET 命令的 NX 和 EX 选项在一条命令中执行，保证原子性
+SET lock thread1 NX EX 10
+```
+
+**2. 释放锁（unlock）**
+
+- **手动释放**：业务执行完成后主动删除锁
+- **超时释放**：通过 `EX` 设置过期时间，防止业务异常或服务宕机导致死锁
+
+Redis 实现：
+```bash
+DEL lock
+```
+
+#### 接口实现
+
+**定义分布式锁接口：**
+
+```java
+public interface ILock {
+    /**
+     * 尝试获取锁
+     * @param timeoutSec 锁持有的超时时间，过期后自动释放
+     * @return true 获取成功，false 获取失败
+     */
+    boolean tryLock(long timeoutSec);
+
+    /**
+     * 释放锁
+     */
+    void unlock();
+}
+```
+
+**Redis 分布式锁实现：**
+
+```java
+public class SimpleRedisLock implements ILock {
+
+    private String name;  // 锁的名称（业务名称）
+    private StringRedisTemplate stringRedisTemplate;
+
+    private static final String KEY_PREFIX = "lock:";
+
+    public SimpleRedisLock(String name, StringRedisTemplate stringRedisTemplate) {
+        this.name = name;
+        this.stringRedisTemplate = stringRedisTemplate;
+    }
+
+    @Override
+    public boolean tryLock(long timeoutSec) {
+        // 获取线程标识
+        long threadId = Thread.currentThread().getId();
+        // 获取锁
+        Boolean success = stringRedisTemplate.opsForValue()
+                .setIfAbsent(KEY_PREFIX + name, threadId + "", timeoutSec, TimeUnit.SECONDS);
+        // 防止自动拆箱出现空指针
+        return Boolean.TRUE.equals(success);
+    }
+
+    @Override
+    public void unlock() {
+        // 释放锁
+        stringRedisTemplate.delete(KEY_PREFIX + name);
+    }
+}
+```
+
+**实现说明：**
+
+1. **锁的 key 设计**：`lock:` + 业务名称，便于区分不同业务的锁
+2. **锁的 value 设计**：使用线程 ID 作为标识，后续用于判断锁的持有者
+3. **setIfAbsent 方法**：对应 Redis 的 `SET NX EX` 命令，保证原子性
+4. **自动拆箱处理**：使用 `Boolean.TRUE.equals()` 避免空指针异常
+
 ## Redis 优化秒杀
 
 ## Redis 消息队列实现异步秒杀
