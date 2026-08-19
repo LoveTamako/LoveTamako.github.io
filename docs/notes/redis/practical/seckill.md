@@ -1063,8 +1063,6 @@ public class Application {
 
 ### 基于 Redis 的分布式锁
 
-#### 核心接口设计
-
 实现分布式锁需要定义两个基本方法：
 
 **1. 获取锁（tryLock）**
@@ -1094,9 +1092,9 @@ Redis 实现：
 DEL lock
 ```
 
-#### 接口实现
+### 初始版本
 
-**定义分布式锁接口：**
+#### 定义分布式锁接口
 
 ```java
 public interface ILock {
@@ -1114,7 +1112,7 @@ public interface ILock {
 }
 ```
 
-**Redis 分布式锁实现：**
+#### Redis 分布式锁实现
 
 ```java
 public class SimpleRedisLock implements ILock {
@@ -1154,6 +1152,357 @@ public class SimpleRedisLock implements ILock {
 2. **锁的 value 设计**：使用线程 ID 作为标识，后续用于判断锁的持有者
 3. **setIfAbsent 方法**：对应 Redis 的 `SET NX EX` 命令，保证原子性
 4. **自动拆箱处理**：使用 `Boolean.TRUE.equals()` 避免空指针异常
+
+:::details 为什么 name 作为构造参数而非方法参数？
+
+```java
+// 当前设计：name 在构造函数中
+SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+lock.tryLock(10);
+lock.unlock();
+
+// 如果 name 作为方法参数
+ILock lock = new SimpleRedisLock(stringRedisTemplate);
+lock.tryLock("order:" + userId, 10);
+lock.unlock("order:" + userId);  // 需要再次传入 name
+```
+
+**原因分析：**
+
+1. **语义明确**：一个锁对象应该明确对应一个资源（如某个用户的订单），而不是一个可以锁任意资源的工具
+2. **防止误用**：如果 name 作为方法参数，容易出现 `tryLock("lockA")` 但 `unlock("lockB")` 的错误，导致锁不匹配
+3. **符合锁的本质**：现实中的锁是和特定的门绑定的（对象状态），而不是一把万能钥匙（工具类）
+4. **线程安全**：同一个锁对象的 name 不变，避免并发场景下 name 参数不一致导致的问题
+5. **简化使用**：`unlock()` 时无需再传参，减少出错可能
+
+:::
+
+#### 测试分布式锁
+
+修改秒杀业务，使用分布式锁替代本地锁：
+
+```java
+@Override
+public Result seckillVoucher(Long voucherId) {
+    // 1. 查询优惠券
+    SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+    // 2. 判断秒杀是否开始
+    if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        return Result.fail("秒杀尚未开始！");
+    }
+    // 3. 判断秒杀是否结束
+    if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
+        return Result.fail("秒杀已经结束！");
+    }
+    // 4. 判断库存是否充足
+    if (voucher.getStock() < 1) {
+        return Result.fail("库存不足！");
+    }
+
+    Long userId = UserHolder.getUser().getId();
+    // 创建锁对象
+    SimpleRedisLock lock = new SimpleRedisLock("order:" + userId, stringRedisTemplate);
+    // 获取锁
+    boolean isLock = lock.tryLock(10);
+    if (!isLock) {
+        // 获取锁失败，返回错误信息
+        return Result.fail("不允许重复下单！");
+    }
+
+    try {
+        // 获取代理对象（事务）
+        IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+        return proxy.createVoucherOrder(voucherId);
+    } finally {
+        // 释放锁
+        lock.unlock();
+    }
+}
+```
+
+**测试步骤：**
+
+1. 启动多个服务实例（如 8081、8082）
+2. 使用 JMeter 或 Postman 进行并发测试
+3. 观察数据库中的订单记录，验证一人一单是否生效
+
+**预期结果：** 同一用户在集群环境下只能下一单，分布式锁有效防止了并发问题。
+
+### 分布式锁误删问题
+
+#### 问题场景
+
+在极端情况下，业务执行时间过长可能导致锁超时自动释放，此时其他线程获取到锁，而原线程执行完成后会误删其他线程的锁，引发并发安全问题。
+
+![误删问题示意图](image-2.png)
+
+| 时间点 | 线程 1 | 线程 2 | 线程 3 | 锁状态 | 问题说明 |
+|-------|--------|--------|--------|--------|----------|
+| T1 | 获取锁成功 | - | - | 线程1持有 | 正常 |
+| T2 | 执行业务中... | 尝试获取锁失败 | - | 线程1持有 | 正常 |
+| T3（10秒后） | 仍在执行业务 | 尝试获取锁失败 | - | **自动释放**（超时） | 锁超时释放 |
+| T4 | 仍在执行业务 | 获取锁成功 | - | 线程2持有 | 线程2获取到锁 |
+| T5（12秒后） | 执行完成，调用unlock() | 执行业务中... | - | **被线程1删除** | ⚠️ 线程1误删线程2的锁 |
+| T6 | - | 执行业务中（无锁保护） | 获取锁成功 | 线程3持有 | ⚠️ 并发问题！线程2、3同时执行 |
+
+**问题根源：** 线程释放锁时没有判断锁是否是自己持有的，导致误删其他线程的锁。
+
+#### 解决方案
+
+在释放锁之前，先判断锁的持有者是否是当前线程：
+
+1. **获取锁时**：存入线程标识（使用 UUID 而非线程 ID，避免不同 JVM 中线程 ID 重复）
+2. **释放锁时**：先获取锁中的线程标识，判断是否与当前线程一致
+   - 一致：说明是自己的锁，可以释放
+   - 不一致：说明锁已超时释放或被其他线程持有，不能释放
+
+![解决方案流程](image-3.png)
+
+
+#### 改进分布式锁实现
+
+**修改锁实现代码：**
+
+```java
+public class SimpleRedisLock implements ILock {
+
+    private String name;  // 锁的名称（业务名称）
+    private StringRedisTemplate stringRedisTemplate;
+
+    private static final String KEY_PREFIX = "lock:";
+    private static final String ID_PREFIX = UUID.randomUUID().toString(true) + "-";
+
+    public SimpleRedisLock(String name, StringRedisTemplate stringRedisTemplate) {
+        this.name = name;
+        this.stringRedisTemplate = stringRedisTemplate;
+    }
+
+    @Override
+    public boolean tryLock(long timeoutSec) {
+        // 获取线程标识：UUID + 线程ID
+        String threadId = ID_PREFIX + Thread.currentThread().getId();
+        // 获取锁
+        Boolean success = stringRedisTemplate.opsForValue()
+                .setIfAbsent(KEY_PREFIX + name, threadId, timeoutSec, TimeUnit.SECONDS);
+        return Boolean.TRUE.equals(success);
+    }
+
+    @Override
+    public void unlock() {
+        // 获取线程标识
+        String threadId = ID_PREFIX + Thread.currentThread().getId();
+        // 获取锁中的标识
+        String id = stringRedisTemplate.opsForValue().get(KEY_PREFIX + name);
+        // 判断标识是否一致
+        if (threadId.equals(id)) {
+            // 释放锁
+            stringRedisTemplate.delete(KEY_PREFIX + name);
+        }
+    }
+}
+```
+
+**改进要点：**
+
+1. **UUID 前缀**：使用 `UUID.randomUUID().toString(true) + "-"` 作为前缀，确保不同 JVM 实例的线程标识唯一
+2. **线程标识组成**：UUID 前缀 + 线程 ID，既保证全局唯一性，又便于调试
+3. **释放锁前校验**：通过 `threadId.equals(id)` 判断锁的持有者，只释放自己的锁
+4. **防止误删**：如果锁已超时释放或被其他线程持有，当前线程不会删除该锁
+
+### 分布式锁原子性问题
+
+#### 问题描述
+
+改进后的 `unlock()` 方法虽然解决了误删问题，但仍然存在原子性隐患：
+
+```java
+public void unlock() {
+    String threadId = ID_PREFIX + Thread.currentThread().getId();
+    String id = stringRedisTemplate.opsForValue().get(KEY_PREFIX + name);  // 步骤1：获取锁标识
+    if (threadId.equals(id)) {                                             // 步骤2：判断是否一致
+        stringRedisTemplate.delete(KEY_PREFIX + name);                     // 步骤3：释放锁
+    }
+}
+```
+
+**问题场景：** 三个步骤分别是三条 Redis 命令，不是原子操作。
+
+![原子性问题示意图](image-7.png)
+
+| 时间点 | 线程 1 | 线程 2 | 线程 3 | 锁状态 | 问题说明 |
+|-------|--------|--------|--------|--------|----------|
+| T1 | 获取锁标识（步骤1） | - | - | 线程1持有 | 判断通过 |
+| T2 | 判断标识一致（步骤2） | 尝试获取锁失败 | - | 线程1持有 | 准备释放 |
+| T3 | **阻塞**（如发生 GC） | 尝试获取锁失败 | - | **超时释放** | 锁已失效 |
+| T4 | 仍在阻塞中 | 获取锁成功 | - | 线程2持有 | 线程2获取到锁 |
+| T5 | 执行 delete（步骤3） | 执行业务中... | 尝试获取锁失败 | **被线程1删除** | ⚠️ 误删了线程2的锁 |
+| T6 | - | 执行业务中（无锁保护） | 获取锁成功 | 线程3持有 | ⚠️ 并发问题！线程2、3同时执行 |
+
+**问题根源：** 判断和释放是两个独立操作，中间可能发生锁超时，导致删除了其他线程的锁。
+
+#### 解决方案：Redis Lua 脚本
+
+Redis 从 **2.6.0 版本**开始支持 Lua 脚本，将 Lua 运行环境集成到 Redis Server 中。客户端可以将一段 Lua 脚本发送到 Redis，由 Redis 在服务端**原子性执行**，从而解决多条命令的竞态问题。
+
+:::details Lua 是什么？
+
+Lua 是一种轻量级、高效的脚本语言，诞生于 1993 年的巴西。由于其小巧灵活的特性，被广泛嵌入到各种应用程序中，如游戏引擎（魔兽世界、愤怒的小鸟）、Web 服务器（Nginx、OpenResty）以及数据库（Redis）等。
+
+Lua 的主要特点：
+- **轻量级**：核心库只有几百 KB
+- **高效**：执行速度快，内存占用低
+- **可嵌入**：易于集成到 C/C++ 等宿主程序中
+- **简单易学**：语法简洁，学习曲线平缓
+
+完整语法可参考：[Lua 教程](https://www.runoob.com/lua/lua-tutorial.html)
+:::
+
+:::details 为什么 Lua 脚本能保证原子性？
+
+Lua 脚本的原子性并非由 Lua 语言本身提供，而是 **Redis 的执行机制保证的**：
+
+1. **单线程模型**：Redis 使用单线程处理命令，Lua 脚本执行期间会独占 Redis 的执行线程
+2. **不可中断**：脚本执行过程中，Redis 不会处理其他客户端的命令请求
+3. **整体执行**：整个脚本作为一个原子操作，要么全部执行成功，要么全部不执行
+
+**对比普通命令执行：**
+
+```
+普通方式（非原子）：
+客户端1: GET key       ← 可能被打断
+客户端2:   SET key 100 ← 插入执行
+客户端1: SET key value ← 继续执行
+
+Lua 脚本（原子）：
+客户端1: EVAL script ← 开始执行
+         └─ GET key
+         └─ SET key value
+         └─ 其他命令...   ← 期间其他客户端命令会等待
+客户端2: 等待中...
+```
+
+这就是为什么使用 Lua 脚本可以解决"判断锁 + 释放锁"的原子性问题。
+
+:::
+
+Redis 在 Lua 执行环境中提供了 `redis.call()` 函数，使 Lua 脚本能够调用 Redis 命令：
+
+```lua
+-- 基本语法
+redis.call('命令名称', 'key', '其它参数', ...)
+
+-- 示例1：设置值
+redis.call('set', 'name', 'jack')
+
+-- 示例2：获取值并返回
+local name = redis.call('get', 'name')
+return name
+```
+
+:::warning 注意
+`redis.call()` 是 Redis 提供给 Lua 的 API，不是 Lua 语言本身的函数。只能在 Redis Server 的 Lua 执行环境中使用，普通 Lua 环境无法调用。
+:::
+
+**在 Redis 中执行 Lua 脚本：**
+
+```bash
+# 基本用法
+EVAL "脚本内容" key的数量 [key ...] [arg ...]
+
+# 示例1：直接写死值
+EVAL "redis.call('set', 'name', 'jack')" 0
+
+# 示例2：使用参数传递（推荐）
+EVAL "redis.call('set', KEYS[1], ARGV[1])" 1 name rose
+```
+
+**参数说明：**
+
+- `KEYS` 数组：存放 key 类型参数，下标从 1 开始
+- `ARGV` 数组：存放其他参数，下标从 1 开始
+- 第一个数字：表示 KEYS 数组的长度
+
+:::tip Lua 脚本的优势
+
+1. **原子性**：整个脚本作为一个整体执行，不会被其他命令插入
+2. **减少网络开销**：多个命令一次性发送，减少往返次数
+3. **可复用**：脚本可以被缓存到 Redis 服务器，通过 SHA1 值调用
+
+:::
+
+#### 使用 Lua 脚本改进释放锁
+
+**RedisTemplate 调用 Lua 脚本的 API：**
+
+Spring Data Redis 提供了 `execute()` 方法来执行 Lua 脚本：
+
+```java
+/**
+ * 执行 Lua 脚本
+ * @param script  封装 Lua 脚本内容和返回值类型（对应 RedisScript<T>）
+ * @param keys    对应 Lua 脚本中的 KEYS 数组
+ * @param args    对应 Lua 脚本中的 ARGV 数组
+ * @return T      脚本执行结果，类型由 RedisScript<T> 指定
+ */
+public <T> T execute(RedisScript<T> script, List<K> keys, Object... args)
+```
+
+**RedisScript 对象创建：**
+
+```java
+DefaultRedisScript<Long> script = new DefaultRedisScript<>();
+script.setScriptText("lua脚本内容");              // 方式1：直接设置脚本内容
+script.setLocation(new ClassPathResource("xx.lua")); // 方式2：从文件加载（推荐）
+script.setResultType(Long.class);                  // 设置返回值类型
+```
+
+**修改 unlock() 方法：**
+
+```java
+public class SimpleRedisLock implements ILock {
+
+    private StringRedisTemplate stringRedisTemplate;
+
+    // Lua 脚本：判断并释放锁
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
+    static {
+        UNLOCK_SCRIPT = new DefaultRedisScript<>();
+        UNLOCK_SCRIPT.setLocation(new ClassPathResource("unlock.lua"));
+        UNLOCK_SCRIPT.setResultType(Long.class);
+    }
+
+    @Override
+    public void unlock() {
+        // 调用 Lua 脚本
+        stringRedisTemplate.execute(
+            UNLOCK_SCRIPT,
+            Collections.singletonList(KEY_PREFIX + name),
+            ID_PREFIX + Thread.currentThread().getId()
+        );
+    }
+}
+```
+
+**创建 Lua 脚本文件 `unlock.lua`：**
+
+在 `resources` 目录下创建 `unlock.lua` 文件：
+
+```lua
+-- 获取锁中的线程标识
+local id = redis.call('get', KEYS[1])
+-- 比较线程标识与锁标识是否一致
+if (id == ARGV[1]) then
+    -- 释放锁
+    return redis.call('del', KEYS[1])
+end
+return 0
+```
+
+**改进效果：**
+
+- 判断和释放在一个 Lua 脚本中完成，保证原子性
+- 即使判断后发生阻塞，整个脚本已执行完毕，不会误删
+- 彻底解决了分布式锁的误删问题
 
 ## Redis 优化秒杀
 
