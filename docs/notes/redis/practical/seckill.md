@@ -1432,6 +1432,21 @@ EVAL "redis.call('set', KEYS[1], ARGV[1])" 1 name rose
 
 #### 使用 Lua 脚本改进释放锁
 
+**创建 Lua 脚本文件 `unlock.lua`：**
+
+在 `resources` 目录下创建 `unlock.lua` 文件：
+
+```lua
+-- 获取锁中的线程标识
+local id = redis.call('get', KEYS[1])
+-- 比较线程标识与锁标识是否一致
+if (id == ARGV[1]) then
+    -- 释放锁
+    return redis.call('del', KEYS[1])
+end
+return 0
+```
+
 **RedisTemplate 调用 Lua 脚本的 API：**
 
 Spring Data Redis 提供了 `execute()` 方法来执行 Lua 脚本：
@@ -1481,21 +1496,6 @@ public class SimpleRedisLock implements ILock {
         );
     }
 }
-```
-
-**创建 Lua 脚本文件 `unlock.lua`：**
-
-在 `resources` 目录下创建 `unlock.lua` 文件：
-
-```lua
--- 获取锁中的线程标识
-local id = redis.call('get', KEYS[1])
--- 比较线程标识与锁标识是否一致
-if (id == ARGV[1]) then
-    -- 释放锁
-    return redis.call('del', KEYS[1])
-end
-return 0
 ```
 
 **改进效果：**
