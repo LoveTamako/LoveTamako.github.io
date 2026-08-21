@@ -1504,6 +1504,33 @@ public class SimpleRedisLock implements ILock {
 - 即使判断后发生阻塞，整个脚本已执行完毕，不会误删
 - 彻底解决了分布式锁的误删问题
 
+## 分布式锁 Redisson
+
+其实上述基于 setnx 实现的分布式锁还存在很多问题，例如：
+
+* **不可重入**：同一个线程无法多次获取同一把锁
+* **不可重试**：获取锁只尝试一次就返回 false，没有重试机制
+* **超时释放**：锁超时释放虽然可以避免死锁，但如果业务执行耗时较长，也会导致锁释放，存在安全隐患
+* **主从一致性**：如果 Redis 提供了主从集群，主从同步存在延迟，当主节点宕机时，如果从节点未同步主节点中的锁数据，则会出现锁失效问题
+
+Redisson 是一个在 Redis 的基础上实现的 Java 驻内存数据网格（In-Memory Data Grid）。它不仅提供了一系列的分布式 Java 常用对象，还提供了许多分布式服务，其中就包含了各种分布式锁的实现。
+
+**Redisson 提供的分布式锁类型：**
+
+* 可重入锁（Reentrant Lock）
+* 公平锁（Fair Lock）
+* 联锁（MultiLock）
+* 红锁（RedLock）
+* 读写锁（ReadWriteLock）
+* 信号量（Semaphore）
+* 可过期性信号量（PermitExpirableSemaphore）
+* 闭锁（CountDownLatch）
+
+**参考资料：**
+
+* 官网地址：https://redisson.org
+* GitHub 地址：https://github.com/redisson/redisson
+
 ## Redis 优化秒杀
 
 ## Redis 消息队列实现异步秒杀
