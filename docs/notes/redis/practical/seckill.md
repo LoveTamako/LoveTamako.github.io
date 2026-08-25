@@ -1531,6 +1531,172 @@ Redisson 是一个在 Redis 的基础上实现的 Java 驻内存数据网格（I
 * 官网地址：https://redisson.org
 * GitHub 地址：https://github.com/redisson/redisson
 
+### 快速入门
+
+#### 1. 引入依赖
+
+在 `pom.xml` 中添加 Redisson 依赖：
+
+```xml
+<dependency>
+    <groupId>org.redisson</groupId>
+    <artifactId>redisson</artifactId>
+    <version>3.17.5</version>
+</dependency>
+```
+
+#### 2. 配置 Redisson 客户端
+
+```java
+@Configuration
+public class RedissonConfig {
+
+    @Bean
+    public RedissonClient redissonClient() {
+        // 配置类
+        Config config = new Config();
+        // 添加 Redis 地址，这里可以是单点、哨兵、集群
+        config.useSingleServer()
+                .setAddress("redis://127.0.0.1:6379")
+                .setPassword("123456");
+        // 创建客户端
+        return Redisson.create(config);
+    }
+}
+```
+
+#### 3. 使用 Redisson 的分布式锁
+
+```java
+@Resource
+private RedissonClient redissonClient;
+
+@Override
+public Result seckillVoucher(Long voucherId) {
+    // 1. 查询优惠券
+    SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+
+    // 2. 判断秒杀是否开始
+    if (voucher.getBeginTime().isAfter(LocalDateTime.now())) {
+        return Result.fail("秒杀尚未开始！");
+    }
+
+    // 3. 判断秒杀是否结束
+    if (voucher.getEndTime().isBefore(LocalDateTime.now())) {
+        return Result.fail("秒杀已经结束！");
+    }
+
+    // 4. 判断库存是否充足
+    if (voucher.getStock() < 1) {
+        return Result.fail("库存不足！");
+    }
+
+    Long userId = UserHolder.getUser().getId();
+    // 创建锁对象
+    RLock lock = redissonClient.getLock("lock:order:" + userId);
+
+    // 获取锁
+    boolean isLock = lock.tryLock();
+
+    // 判断是否获取锁成功
+    if (!isLock) {
+        // 获取锁失败，返回错误信息
+        return Result.fail("不允许重复下单！");
+    }
+
+    try {
+        // 获取代理对象（事务）
+        IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+        return proxy.createVoucherOrder(voucherId);
+    } finally {
+        // 释放锁
+        lock.unlock();
+    }
+}
+```
+
+### 可重入锁原理
+
+Redisson 的可重入锁基于 Redis 的 **Hash 结构**实现，使用 **Lua 脚本**保证原子性。
+
+![redisson可重入加锁解锁流程图](image-5.png)
+
+#### 数据结构
+
+```
+Hash 结构：
+  key:   lock:order:123
+  field: UUID:ThreadID（线程唯一标识）
+  value: 重入次数
+```
+
+#### 获取锁的 Lua 脚本
+
+```lua
+-- 参数说明
+-- KEYS[1]: 锁的 key
+-- ARGV[1]: 锁的过期时间（毫秒）
+-- ARGV[2]: 线程标识（UUID + 线程 ID）
+
+-- 判断锁是否存在
+if (redis.call('exists', KEYS[1]) == 0) then
+    -- 锁不存在，获取锁并设置重入次数为 1
+    redis.call('hset', KEYS[1], ARGV[2], 1);
+    redis.call('pexpire', KEYS[1], ARGV[1]);
+    return 1;  -- 获取锁成功
+end;
+
+-- 锁已存在，判断是否是当前线程持有
+if (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then
+    -- 是当前线程持有，重入次数 +1
+    redis.call('hincrby', KEYS[1], ARGV[2], 1);
+    redis.call('pexpire', KEYS[1], ARGV[1]);
+    return 1;  -- 可重入，获取锁成功
+end;
+
+-- 锁被其他线程持有，获取锁失败
+return 0;
+```
+
+#### 释放锁的 Lua 脚本
+
+```lua
+-- 参数说明
+-- KEYS[1]: 锁的 key
+-- ARGV[1]: 锁的过期时间（毫秒）
+-- ARGV[2]: 线程标识
+
+-- 判断锁是否存在且是否是当前线程持有
+if (redis.call('hexists', KEYS[1], ARGV[2]) == 0) then
+    return nil;  -- 锁不存在或不属于当前线程
+end;
+
+-- 重入次数 -1
+local counter = redis.call('hincrby', KEYS[1], ARGV[2], -1);
+
+-- 判断是否还有重入
+if (counter > 0) then
+    -- 还有重入，只刷新过期时间
+    redis.call('pexpire', KEYS[1], ARGV[1]);
+    return 0;  -- 锁未完全释放
+else
+    -- 重入次数为 0，删除锁
+    redis.call('del', KEYS[1]);
+    return 1;  -- 锁完全释放
+end;
+```
+
+#### 工作流程示例
+
+以线程 A（ID: thread-A）为例，展示可重入锁的完整流程：
+
+| 步骤 | 操作 | Hash 数据结构 | 说明 |
+|------|------|--------------|------|
+| 1 | 第一次获取锁 | `{ "thread-A": 1 }` | 初次获取，重入次数设为 1 |
+| 2 | 方法内部再次获取锁 | `{ "thread-A": 2 }` | 可重入，重入次数 +1 |
+| 3 | 第一次释放锁 | `{ "thread-A": 1 }` | 重入次数 -1，锁未完全释放 |
+| 4 | 第二次释放锁 | `(key 已删除)` | 重入次数减到 0，删除锁 |
+
 ## Redis 优化秒杀
 
 ## Redis 消息队列实现异步秒杀
