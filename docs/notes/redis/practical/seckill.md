@@ -1697,6 +1697,344 @@ end;
 | 3 | 第一次释放锁 | `{ "thread-A": 1 }` | 重入次数 -1，锁未完全释放 |
 | 4 | 第二次释放锁 | `(key 已删除)` | 重入次数减到 0，删除锁 |
 
+### 锁重试原理
+
+前面使用 `RLock lock = redissonClient.getLock(...)` 获取的是 Redisson 的可重入锁，核心实现类是 `RedissonLock`。源码版本以前文依赖的 `redisson:3.17.5` 为准。
+
+先看锁重试相关的源码。理解之前，需要区分几个常用 API：
+
+| 调用方式 | 是否等待重试 | 是否启用看门狗 | 说明 |
+|---------|-------------|---------------|------|
+| `tryLock()` | 否 | 是 | 只尝试一次，失败立即返回 `false` |
+| `tryLock(waitTime, unit)` | 是 | 是 | 在 `waitTime` 内等待并重试，成功后自动续期 |
+| `tryLock(waitTime, leaseTime, unit)` | 是 | 否 | 在 `waitTime` 内等待并重试，锁在 `leaseTime` 后自动释放 |
+
+因此，上面秒杀代码中的 `lock.tryLock()` 适合“一人一单”这种快速失败场景：获取失败直接提示“不允许重复下单”。如果希望短暂等待其他线程释放锁，可以使用带 `waitTime` 的重载方法。
+
+下面这张图对应 RedissonLock 后续源码链路，可以先建立整体印象：
+
+![锁重试和看门狗机制整体流程图](image-4.png)
+
+#### 1. 加锁源码入口
+
+Redisson 加锁最终会进入 `tryLockInnerAsync()`，通过 Lua 脚本保证“判断锁、设置锁、设置过期时间”的原子性。
+
+```java
+<T> RFuture<T> tryLockInnerAsync(long leaseTime, TimeUnit unit,
+                                long threadId, RedisStrictCommand<T> command) {
+    return evalWriteAsync(getRawName(), LongCodec.INSTANCE, command,
+            "if (redis.call('exists', KEYS[1]) == 0) then " +
+                "redis.call('hincrby', KEYS[1], ARGV[2], 1); " +
+                "redis.call('pexpire', KEYS[1], ARGV[1]); " +
+                "return nil; " +
+            "end; " +
+            "if (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then " +
+                "redis.call('hincrby', KEYS[1], ARGV[2], 1); " +
+                "redis.call('pexpire', KEYS[1], ARGV[1]); " +
+                "return nil; " +
+            "end; " +
+            "return redis.call('pttl', KEYS[1]);",
+            Collections.singletonList(getRawName()),
+            unit.toMillis(leaseTime), getLockName(threadId));
+}
+```
+
+这段脚本和前面的可重入锁逻辑一致，只是返回值更适合重试控制：
+
+- **锁不存在**：写入 `Hash`，field 是当前线程标识，value 是重入次数 `1`，并设置过期时间，返回 `nil`
+- **锁由当前线程持有**：重入次数 `+1`，刷新过期时间，返回 `nil`
+- **锁由其他线程持有**：获取失败，返回 `pttl`，表示这把锁剩余的过期时间
+
+Redisson 在 Java 侧用 `ttl == null` 判断是否加锁成功；如果返回的是剩余 TTL，说明锁被其他线程占用，需要进入等待重试流程。
+
+#### 2. 锁重试原理
+
+带 `waitTime` 的 `tryLock()` 并不是一直循环访问 Redis，而是 **先尝试加锁，失败后订阅释放锁消息，再按 TTL 或剩余等待时间阻塞等待**。
+
+核心流程可以简化为：
+
+```java
+public boolean tryLock(long waitTime, long leaseTime, TimeUnit unit)
+        throws InterruptedException {
+    long time = unit.toMillis(waitTime);
+    long threadId = Thread.currentThread().getId();
+
+    // 第一次尝试加锁，成功返回 null，失败返回锁剩余 TTL
+    long current = System.currentTimeMillis();
+    Long ttl = tryAcquire(waitTime, leaseTime, unit, threadId);
+    if (ttl == null) {
+        return true;
+    }
+
+    time -= System.currentTimeMillis() - current;
+    if (time <= 0) {
+        return false;
+    }
+
+    // 加锁失败后，订阅锁释放消息
+    current = System.currentTimeMillis();
+    RFuture<RedissonLockEntry> subscribeFuture = subscribe(threadId);
+    if (!subscribeFuture.await(time, TimeUnit.MILLISECONDS)) {
+        return false;
+    }
+
+    try {
+        time -= System.currentTimeMillis() - current;
+        while (time > 0) {
+            current = System.currentTimeMillis();
+            ttl = tryAcquire(waitTime, leaseTime, unit, threadId);
+            if (ttl == null) {
+                return true;
+            }
+
+            time -= System.currentTimeMillis() - current;
+            if (time <= 0) {
+                return false;
+            }
+
+            // 优先等待锁的剩余 TTL；如果 TTL 比剩余等待时间长，就只等待 waitTime 剩余时间
+            current = System.currentTimeMillis();
+            if (ttl >= 0 && ttl < time) {
+                subscribeFuture.getNow().getLatch().tryAcquire(ttl, TimeUnit.MILLISECONDS);
+            } else {
+                subscribeFuture.getNow().getLatch().tryAcquire(time, TimeUnit.MILLISECONDS);
+            }
+            time -= System.currentTimeMillis() - current;
+        }
+        return false;
+    } finally {
+        unsubscribe(subscribeFuture.getNow(), threadId);
+    }
+}
+```
+
+:::details 为什么要先订阅再重试？
+
+如果只使用循环重试，会出现大量线程频繁执行 Lua 脚本，Redis 压力会比较大。
+
+Redisson 使用 Redis 的 **Pub/Sub** 做等待通知：
+
+1. 线程 A 持有锁，线程 B 第一次加锁失败，拿到锁的剩余 TTL
+2. 线程 B 订阅这把锁对应的 channel，然后阻塞等待
+3. 线程 A 最终释放锁时，会删除锁并向 channel 发布释放消息
+4. 线程 B 收到消息后被唤醒，再次执行 Lua 脚本尝试加锁
+5. 如果一直没有收到释放消息，线程 B 最多等待到 `waitTime` 超时，然后返回 `false`
+
+这样既避免了忙等自旋，又能在锁提前释放时及时唤醒等待线程。
+
+:::
+
+#### 3. 解锁时如何唤醒等待线程
+
+Redisson 的解锁脚本除了处理可重入次数，还会在锁真正释放时发布消息：
+
+```lua
+-- 判断当前线程是否持有锁
+if (redis.call('hexists', KEYS[1], ARGV[3]) == 0) then
+    return nil;
+end;
+
+-- 重入次数 -1
+local counter = redis.call('hincrby', KEYS[1], ARGV[3], -1);
+
+if (counter > 0) then
+    redis.call('pexpire', KEYS[1], ARGV[2]);
+    return 0;
+else
+    redis.call('del', KEYS[1]);
+    redis.call('publish', KEYS[2], ARGV[1]);
+    return 1;
+end;
+```
+
+这里的关键点是：
+
+- `counter > 0`：说明只是释放了一层重入锁，锁还没有真正释放，只刷新过期时间，不发布消息
+- `counter == 0`：说明锁彻底释放，删除锁 key，并通过 `publish` 唤醒等待线程
+- 等待线程被唤醒后不会直接获得锁，而是重新执行加锁 Lua 脚本，继续通过 Redis 保证互斥
+
+### 看门狗机制
+
+前面的锁重试解决的是“没抢到锁时如何等待并再次尝试”的问题；看门狗机制解决的是“已经抢到锁后，业务还没执行完，锁不能提前过期”的问题。
+
+Redis 分布式锁必须设置过期时间，否则服务宕机会导致死锁。但如果过期时间设置得太短，业务还没执行完锁就过期，又会出现并发安全问题。
+
+Redisson 的看门狗机制就是为了解决这个问题：**如果加锁时没有显式指定 `leaseTime`，Redisson 会给锁设置默认过期时间，并在业务执行期间定时续期**。
+
+`tryAcquireAsync()` 中可以看到这个判断：
+
+```java
+private <T> RFuture<Long> tryAcquireAsync(long waitTime, long leaseTime,
+                                          TimeUnit unit, long threadId) {
+    if (leaseTime != -1) {
+        // 指定了 leaseTime：使用固定租约时间，不开启看门狗
+        return tryLockInnerAsync(waitTime, leaseTime, unit, threadId, RedisCommands.EVAL_LONG);
+    }
+
+    // 未指定 leaseTime：先使用 internalLockLeaseTime 加锁
+    RFuture<Long> ttlRemainingFuture = tryLockInnerAsync(
+            waitTime, internalLockLeaseTime, TimeUnit.MILLISECONDS,
+            threadId, RedisCommands.EVAL_LONG);
+
+    ttlRemainingFuture.onComplete((ttlRemaining, e) -> {
+        if (e != null) {
+            return;
+        }
+        if (ttlRemaining == null) {
+            // 加锁成功后，开启看门狗续期任务
+            scheduleExpirationRenewal(threadId);
+        }
+    });
+    return ttlRemainingFuture;
+}
+```
+
+其中 `internalLockLeaseTime` 来自配置项 `lockWatchdogTimeout`，默认值是 **30 秒**。
+
+```java
+private long lockWatchdogTimeout = 30 * 1000;
+```
+
+也就是说，默认情况下：
+
+- 第一次加锁成功后，锁的 TTL 是 `30s`
+- 看门狗每隔 `internalLockLeaseTime / 3` 执行一次，也就是约 `10s` 续期一次
+- 续期时会把锁的 TTL 重新设置为 `30s`
+- 只要 Redisson 客户端还存活，并且当前线程仍然持有锁，续期就会持续执行
+
+#### 1. 看门狗续期源码
+
+`RedissonBaseLock` 中会维护一个续期任务表，用来记录哪些锁需要自动续期。
+
+```java
+private static final ConcurrentMap<String, ExpirationEntry> EXPIRATION_RENEWAL_MAP
+        = new ConcurrentHashMap<>();
+
+protected void scheduleExpirationRenewal(long threadId) {
+    ExpirationEntry entry = new ExpirationEntry();
+    ExpirationEntry oldEntry = EXPIRATION_RENEWAL_MAP.putIfAbsent(getEntryName(), entry);
+
+    if (oldEntry != null) {
+        oldEntry.addThreadId(threadId);
+    } else {
+        entry.addThreadId(threadId);
+        renewExpiration();
+    }
+}
+```
+
+真正的续期任务在 `renewExpiration()` 中调度：
+
+```java
+private void renewExpiration() {
+    ExpirationEntry ee = EXPIRATION_RENEWAL_MAP.get(getEntryName());
+    if (ee == null) {
+        return;
+    }
+
+    Timeout task = commandExecutor.getConnectionManager().newTimeout(new TimerTask() {
+        @Override
+        public void run(Timeout timeout) throws Exception {
+            ExpirationEntry ent = EXPIRATION_RENEWAL_MAP.get(getEntryName());
+            if (ent == null) {
+                return;
+            }
+
+            Long threadId = ent.getFirstThreadId();
+            if (threadId == null) {
+                return;
+            }
+
+            RFuture<Boolean> future = renewExpirationAsync(threadId);
+            future.onComplete((res, e) -> {
+                if (e != null) {
+                    EXPIRATION_RENEWAL_MAP.remove(getEntryName());
+                    return;
+                }
+
+                if (res) {
+                    // 续期成功后，再安排下一次续期
+                    renewExpiration();
+                } else {
+                    // 锁已经不存在或不属于当前线程，取消续期
+                    cancelExpirationRenewal(null);
+                }
+            });
+        }
+    }, internalLockLeaseTime / 3, TimeUnit.MILLISECONDS);
+
+    ee.setTimeout(task);
+}
+```
+
+续期本身仍然通过 Lua 脚本完成：
+
+```java
+protected RFuture<Boolean> renewExpirationAsync(long threadId) {
+    return evalWriteAsync(getRawName(), LongCodec.INSTANCE, RedisCommands.EVAL_BOOLEAN,
+            "if (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then " +
+                "redis.call('pexpire', KEYS[1], ARGV[1]); " +
+                "return 1; " +
+            "end; " +
+            "return 0;",
+            Collections.singletonList(getRawName()),
+            internalLockLeaseTime, getLockName(threadId));
+}
+```
+
+这段脚本的含义是：
+
+1. 先用 `hexists` 判断当前线程是否仍然持有这把锁
+2. 如果还持有，就用 `pexpire` 把锁过期时间重新设置为 `internalLockLeaseTime`
+3. 如果不持有，返回 `0`，Java 侧会取消后续续期任务
+
+#### 2. 释放锁时取消看门狗
+
+业务执行完成后调用 `unlock()`，Redisson 会在解锁完成后取消续期任务：
+
+```java
+protected void cancelExpirationRenewal(Long threadId) {
+    ExpirationEntry task = EXPIRATION_RENEWAL_MAP.get(getEntryName());
+    if (task == null) {
+        return;
+    }
+
+    if (threadId != null) {
+        task.removeThreadId(threadId);
+    }
+
+    if (threadId == null || task.hasNoThreads()) {
+        Timeout timeout = task.getTimeout();
+        if (timeout != null) {
+            timeout.cancel();
+        }
+        EXPIRATION_RENEWAL_MAP.remove(getEntryName());
+    }
+}
+```
+
+看门狗不是让锁永远不释放，而是在满足条件时自动续期：
+
+| 场景 | 看门狗行为 |
+|------|-----------|
+| 没有指定 `leaseTime` 且加锁成功 | 开启看门狗续期 |
+| 显式指定 `leaseTime` | 不开启看门狗，到期自动释放 |
+| 当前线程仍持有锁 | 每隔约 `1/3` 租约时间续期一次 |
+| 主动 `unlock()` | 释放锁并取消续期任务 |
+| JVM 宕机或 Redisson 客户端停止 | 无法续期，锁到期后自动释放 |
+
+### 小结
+
+Redisson 分布式锁在 Redis 基础命令之上，主要补强了三个能力：
+
+| 能力 | 实现方式 | 解决的问题 |
+|------|---------|-----------|
+| 可重入 | 使用 `Hash` 结构保存线程标识和重入次数 | 同一线程重复获取同一把锁时不会被自己阻塞 |
+| 可重试 | 通过信号量和 Redis `Pub/Sub` 实现等待、唤醒和再次抢锁 | 获取锁失败时不需要忙等自旋，可以在释放锁后及时重试 |
+| 超时续约 | 通过 WatchDog 定时任务每隔 `leaseTime / 3` 续期一次 | 业务未执行完时避免锁提前过期，客户端宕机后又能依赖 TTL 自动释放 |
+
+简单来说：**可重入保证同一线程能重复进入，可重试降低竞争时的 Redis 压力，看门狗保证长业务执行期间锁不会提前失效**。
+
 ## Redis 优化秒杀
 
 ## Redis 消息队列实现异步秒杀
