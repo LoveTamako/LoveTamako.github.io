@@ -2023,17 +2023,236 @@ protected void cancelExpirationRenewal(Long threadId) {
 | 主动 `unlock()` | 释放锁并取消续期任务 |
 | JVM 宕机或 Redisson 客户端停止 | 无法续期，锁到期后自动释放 |
 
+### 主从一致性问题
+
+前面手写的 Redis 锁，以及单个 `RedissonClient` 管理的锁，通常都只把锁写入一个 Redis 主节点。主节点和从节点之间采用**异步复制**，因此“主节点返回成功”和“从节点已经接收并应用这条锁记录”不是同一时刻。
+
+#### 单个主从组为什么仍可能丢锁
+
+假设客户端 A 在主节点 `M1` 上成功执行了加锁 Lua 脚本：
+
+```text
+1. 客户端 A -> M1：写入 lock:order:123，并返回加锁成功
+2. M1 -> S1：复制命令还在网络或复制缓冲区中，尚未到达
+3. M1 宕机，哨兵将 S1 提升为新的主节点
+4. S1 上没有 lock:order:123
+5. 客户端 B -> S1：认为锁不存在，成功获取同一个业务锁
+```
+
+此时 A 可能仍在执行下单事务，A、B 就会同时进入临界区：
+
+| 时间点 | 客户端 A | Redis 主从组 | 客户端 B |
+|-------|---------|-------------|---------|
+| T1 | 请求加锁 | `M1` 写入锁，尚未同步到 `S1` | - |
+| T2 | 持有锁执行业务 | `M1` 宕机，`S1` 被提升 | - |
+| T3 | 仍在执行业务 | 新主 `S1` 中没有锁 key | 请求加锁成功 |
+| T4 | 提交事务 | 同一个逻辑锁出现两位持有者 | 进入临界区 |
+
+![redis集群示意图](image-6.png)
+
+这正是“主从一致性”问题：**副本可以提高服务可用性，但一次故障转移可能暴露尚未复制的数据**。锁的 TTL 和看门狗只能管理已经写入的锁，不能找回主节点宕机前尚未复制到从节点的写入。
+
+从 Redisson 3.17.5 源码看，[`RedissonLock.tryLockInnerAsync()`](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/RedissonLock.java) 最终通过 [`RedissonBaseLock.evalWriteAsync()`](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/RedissonBaseLock.java) 执行加锁 Lua。后者会根据可用从节点创建 `CommandBatchService`，并配置 `BatchOptions.syncSlaves(availableSlaves, 1, TimeUnit.SECONDS)`，尝试等待从节点同步；[`Config.checkLockSyncedSlaves`](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/config/Config.java) 默认是 `true`，如果一个从节点都没有同步成功则报告异常：
+
+```java
+// RedissonBaseLock.evalWriteAsync() 的关键逻辑（3.17.5）
+int availableSlaves = entry.getAvailableSlaves();
+CommandBatchService executor = createCommandBatchService(availableSlaves);
+// createCommandBatchService 内部：
+// BatchOptions.defaults().syncSlaves(availableSlaves, 1, TimeUnit.SECONDS)
+
+if (config.isCheckLockSyncedSlaves()
+        && res.getSyncedSlaves() == 0
+        && availableSlaves > 0) {
+    throw new IllegalStateException("None of slaves were synced");
+}
+```
+
+注意：`WAIT` 请求等待当前可用副本确认，但源码的异常检查只判断 `syncedSlaves == 0`，并不保证所有副本都确认，更不保证故障转移时一定保留这次写入。即使等待或检查最终抛出异常，主节点上的 Lua 可能已经执行，锁 key 也不一定会自动回滚，调用方仍需依靠 TTL、补偿和幂等逻辑处理不确定状态。这能降低“刚加锁就发生故障转移”时丢锁的概率，并在完全没有副本同步时及时暴露问题，但仍不等价于共识协议。因此，不能把普通的一主多从理解成多个独立的锁服务。
+
+### Redisson MultiLock
+
+#### MultiLock 的思路
+
+Redisson 的 `MultiLock` 将多个彼此独立的 `RLock` 组合成一把逻辑锁。以 [Redisson 3.17.5 的 `Redisson`](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/Redisson.java) 和 [`RedissonMultiLock`](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/RedissonMultiLock.java) 源码为准，工厂方法实现非常直接：
+
+```java
+@Override
+public RLock getMultiLock(RLock... locks) {
+    return new RedissonMultiLock(locks);
+}
+```
+
+`RedissonMultiLock` 的构造函数要求至少传入一个锁，并且源码注释明确说明：每个 `RLock` 可以由**不同的 Redisson 实例**创建。它本身不把三次写入封装成跨 Redis 事务，而是依次调用每个成员 `RLock`；因此每个成员仍然会沿用前面 [RedissonLock](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/RedissonLock.java) 的 Lua、主从同步等待和看门狗逻辑。典型拓扑如下：
+
+```text
+                     同一个业务锁名 lock:order:123
+                              │
+          ┌───────────────────┼───────────────────┐
+          ▼                   ▼                   ▼
+   Redis Master 1      Redis Master 2      Redis Master 3
+   （自己的副本）       （自己的副本）       （自己的副本）
+```
+
+这里的三个 Master 必须是相互独立的 Redis 部署或故障域。把一个 Master 和它的两个 Slave 分别配置成三个客户端并不能达到同样效果，因为它们仍然共享同一个复制组和故障来源。
+
+> **MultiLock 与 RedLock 不是同一个概念。** `getMultiLock()` 返回 `RedissonMultiLock`，默认要求所有成员锁都成功；`getRedLock()` 返回的是单独的 [`RedissonRedLock`](https://github.com/redisson/redisson/blob/redisson-3.17.5/redisson/src/main/java/org/redisson/RedissonRedLock.java) 实现，采用另一套按成功数量判断的算法。本文这里讨论的是 MultiLock，不应把“多个节点”自动等同于 RedLock 或共识系统。
+
+#### 配置三个独立 RedissonClient
+
+沿用前面单节点配置的写法，先为三个独立 Redis Master 创建客户端。示例中的端口只是本地演示；生产环境应让三个 endpoint 分布在不同实例、主机甚至故障域中，并为每个客户端配置真实的密码、TLS、连接池和超时参数。
+
+```java
+@Configuration
+public class MultiLockConfig {
+
+    private Config config(String address) {
+        Config config = new Config();
+        config.useSingleServer()
+                .setAddress(address)
+                .setPassword("123456");
+        return config;
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public RedissonClient redissonClient1() {
+        return Redisson.create(config("redis://127.0.0.1:6379"));
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public RedissonClient redissonClient2() {
+        return Redisson.create(config("redis://127.0.0.1:6380"));
+    }
+
+    @Bean(destroyMethod = "shutdown")
+    public RedissonClient redissonClient3() {
+        return Redisson.create(config("redis://127.0.0.1:6381"));
+    }
+}
+```
+
+**配置时要注意：**
+
+1. 三个客户端应该连接三个独立的 Redis Master，而不是同一 Master 的三个副本。
+2. `RedissonClient` 是长生命周期资源，应在 Spring 容器销毁时调用 `shutdown()`，不能在每次请求中创建和销毁。
+3. 如果使用哨兵或 Redis Cluster，应让每个 MultiLock 成员对应不同的独立集群；同一集群内的 Master/Slave 仍然只算一个故障域。
+4. 节点数量、部署故障域和超时时间应根据业务验证，节点越多，获取锁的网络往返和失败概率也越高。
+
+#### 创建和使用 MultiLock
+
+下面以“一人一单”的用户锁为例。三个节点上的 key 名相同，只有三把成员锁全部获取成功，MultiLock 才返回成功：
+
+```java
+@Resource(name = "redissonClient1")
+private RedissonClient client1;
+
+@Resource(name = "redissonClient2")
+private RedissonClient client2;
+
+@Resource(name = "redissonClient3")
+private RedissonClient client3;
+
+public Result createOrderWithMultiLock(Long voucherId) throws InterruptedException {
+    Long userId = UserHolder.getUser().getId();
+    String lockName = "lock:order:" + userId;
+
+    // 每个锁来自一个独立的 RedissonClient
+    RLock lock1 = client1.getLock(lockName);
+    RLock lock2 = client2.getLock(lockName);
+    RLock lock3 = client3.getLock(lockName);
+
+    // 3.17.5 中 getMultiLock() 最终创建 RedissonMultiLock
+    RLock multiLock = client1.getMultiLock(lock1, lock2, lock3);
+
+    boolean locked = false;
+    try {
+        // waitTime 内等待；不传 leaseTime，成员锁使用看门狗续期
+        locked = multiLock.tryLock(1, TimeUnit.SECONDS);
+        if (!locked) {
+            return Result.fail("系统繁忙，请稍后重试！");
+        }
+
+        // 事务仍建议通过 Spring 代理调用，沿用前文 createVoucherOrder() 的写法
+        IVoucherOrderService proxy = (IVoucherOrderService) AopContext.currentProxy();
+        return proxy.createVoucherOrder(voucherId);
+    } finally {
+        // MultiLock 的 isHeldByCurrentThread() 在 3.17.5 中未实现，使用成功标记保护 unlock
+        if (locked) {
+            multiLock.unlock();
+        }
+    }
+}
+```
+
+如果业务必须限制锁最长持有时间，可以显式指定租约：
+
+```java
+boolean locked = multiLock.tryLock(1, 10, TimeUnit.SECONDS);
+```
+
+但这会关闭成员 `RLock` 的看门狗续期，业务必须确保 10 秒足够；否则应使用不带 `leaseTime` 的重载，并依赖前一节介绍的看门狗机制。无论采用哪种方式，都要保证租约覆盖数据库事务，并在 `finally` 中释放锁。
+
+#### MultiLock 获取与释放的源码链路
+
+`RedissonMultiLock.tryLock(waitTime, leaseTime, unit)` 会按照传入顺序遍历成员锁：
+
+```java
+for (RLock lock : locks) {
+    boolean lockAcquired = lock.tryLock(awaitTime, newLeaseTime,
+                                        TimeUnit.MILLISECONDS);
+    if (lockAcquired) {
+        acquiredLocks.add(lock);
+    } else {
+        // failedLocksLimit() 在 MultiLock 中默认为 0
+        unlockInner(acquiredLocks);
+        // waitTime > 0 时重置迭代器，在剩余时间内重新尝试
+        // waitTime <= 0 时直接返回 false
+    }
+}
+return true;
+```
+
+源码中的关键行为如下：
+
+1. **全量成功**：默认 `failedLocksLimit()` 返回 `0`，不是“多数节点成功即可”，而是所有成员都必须成功。
+2. **部分回滚**：如果前两个节点已加锁、第三个节点失败，`unlockInner(acquiredLocks)` 会解锁已经获得的成员，避免留下半把锁；回滚本身是对多个 Redis 的独立操作，不是跨 Redis 的分布式事务，因此短时间内可能存在部分锁。
+3. **等待重试**：`waitTime > 0` 时，失败后会释放已获取的锁、重置迭代器，并在剩余等待时间内重试；等待时间耗尽则释放已获取的锁并返回 `false`。这和前面 `RedissonLock` 的 Pub/Sub 等待机制叠加，成员锁自身仍按其实现等待/唤醒。
+4. **释放方式**：`unlock()` 会对所有成员调用 `unlockAsync()` 并等待结果；任一节点网络异常都可能使释放过程报错，所以必须记录告警并设计节点恢复后的清理策略。
+5. **租约与看门狗**：`RedissonMultiLock` 本身不维护看门狗，续期由每一把成员 `RedissonLock` 负责；不指定 `leaseTime` 时成员按默认 `lockWatchdogTimeout` 续期，显式指定租约时则由每个成员独立到期。
+
+#### 故障处理与适用边界
+
+| 场景 | MultiLock 行为 | 需要注意 |
+|------|---------------|---------|
+| 一个独立 Redis 节点不可用 | 无法完成全量加锁，返回失败或在 `waitTime` 内重试 | 可用性下降，不能按“多数成功”继续执行业务 |
+| 前几个节点成功、后一个节点失败 | 回滚已获得的成员锁 | 回滚不是跨节点事务，需设置合理 TTL 防止残留 |
+| 单个主从组发生故障转移 | 该组仍可能出现锁丢失 | MultiLock 只降低单组故障造成的窗口，不能替代共识协议 |
+| 客户端宕机或网络隔离 | 看门狗无法续期，成员锁最终按 TTL 释放 | 业务事务和锁租约可能产生边界，需要数据库兜底 |
+| 节点数量增加 | 故障独立性可能增强 | 网络延迟、运维成本和全量成功概率也会增加 |
+
+#### 验证方案
+
+应在隔离的测试环境验证拓扑和故障行为，而不是只在单机上启动三个端口：
+
+1. **普通主从锁**：让客户端连接一个主从组，在复制尚未完成时停止主节点并提升滞后的从节点，观察新主上是否缺少锁 key；该实验用于复现单组故障转移的风险。
+2. **MultiLock 正常流程**：准备三个独立 Redis Master（每个可再配置自己的副本），让两个线程使用同一个 `lockName` 并发调用 `tryLock(0, 1, TimeUnit.SECONDS)`，预期同一时刻只有一个线程拿到三把成员锁。
+3. **部分失败回滚**：让第三个 Redis 不可用，检查前两个节点上的临时锁会在回滚或 TTL 到期后消失；这能直观看到 MultiLock 没有跨节点事务。
+4. **租约边界**：分别测试不传 `leaseTime` 和显式传入 `leaseTime` 的情况，确认长任务期间看门狗续期生效，以及客户端停止后锁最终会过期。
+
+对于秒杀“一人一单”，MultiLock 可以作为跨多个独立 Redis 部署的风险缓解手段，但不能替代数据库的最终约束。订单表仍应建立 `(user_id, voucher_id)` 唯一索引，并对重复键异常做幂等处理；库存更新也应继续使用前文的 `stock > 0` 原子条件。只有把分布式锁、数据库约束和异常补偿结合起来，才能在锁服务故障时仍保证业务结果正确。
+
 ### 小结
 
-Redisson 分布式锁在 Redis 基础命令之上，主要补强了三个能力：
+Redisson 分布式锁在 Redis 基础命令之上，主要补强了以下能力：
 
 | 能力 | 实现方式 | 解决的问题 |
 |------|---------|-----------|
 | 可重入 | 使用 `Hash` 结构保存线程标识和重入次数 | 同一线程重复获取同一把锁时不会被自己阻塞 |
 | 可重试 | 通过信号量和 Redis `Pub/Sub` 实现等待、唤醒和再次抢锁 | 获取锁失败时不需要忙等自旋，可以在释放锁后及时重试 |
 | 超时续约 | 通过 WatchDog 定时任务每隔 `leaseTime / 3` 续期一次 | 业务未执行完时避免锁提前过期，客户端宕机后又能依赖 TTL 自动释放 |
+| 主从故障缓解 | 通过副本同步检查或 MultiLock 组合多个独立 Redis Master | 降低单个复制组故障转移导致锁丢失的风险，但不提供绝对强一致 |
 
-简单来说：**可重入保证同一线程能重复进入，可重试降低竞争时的 Redis 压力，看门狗保证长业务执行期间锁不会提前失效**。
+简单来说：**可重入保证同一线程能重复进入，可重试降低竞争时的 Redis 压力，看门狗保证长业务执行期间锁不会提前失效，MultiLock 则通过多个独立锁共同降低单节点故障风险；最终正确性仍需要数据库约束兜底**。
 
 ## Redis 优化秒杀
 
