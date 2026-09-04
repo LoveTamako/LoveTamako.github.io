@@ -2662,4 +2662,318 @@ Redisson 分布式锁在 Redis 基础命令之上，主要补强了以下能力�
 
 ## Redis 优化秒杀
 
+### 优化思路
+
+前面的方案通过分布式锁解决了“一人一单”的并发安全问题，但下单请求仍需要同步完成以下操作：
+
+1. 查询秒杀券并校验库存
+2. 查询订单并校验一人一单
+3. 扣减数据库库存
+4. 创建订单并写入数据库
+
+经过 JMeter 压力测试可以发现，大量请求会直接访问数据库，并在分布式锁处等待。整个流程耗时较长，数据库也会成为系统的性能瓶颈。
+
+秒杀接口真正需要立即告诉用户的只是“是否获得下单资格”，并不需要等待订单写入数据库。因此，可以将业务拆分为两个阶段：
+
+| 阶段 | 处理内容 | 执行方式 |
+|------|---------|---------|
+| 秒杀资格校验 | 判断库存是否充足、是否重复下单 | Redis + Lua 脚本同步完成 |
+| 订单持久化 | 扣减数据库库存、创建订单 | JVM 阻塞队列异步完成 |
+
+![异步秒杀架构](image-8.png)
+
+优化后，请求线程只访问 Redis。资格校验通过后，将订单信息写入 JVM 阻塞队列并立即返回订单 ID，再由独立线程异步完成数据库写入，从而缩短接口响应时间并降低数据库在高并发场景下的压力。
+
+### Redis 数据结构设计
+
+为了在 Redis 中完成库存判断和一人一单校验，需要保存两类数据：
+
+| 业务数据 | Redis 类型 | Key 设计 | Value / Member |
+|---------|-----------|----------|----------------|
+| 秒杀券库存 | `String` | `seckill:stock:{voucherId}` | 剩余库存数量 |
+| 已下单用户 | `Set` | `seckill:order:{voucherId}` | 用户 ID |
+
+- `String` 支持通过 `GET` 获取库存，并使用 `DECR` 原子扣减库存
+- `Set` 中的成员不会重复，可通过 `SISMEMBER` 判断用户是否已经下单，并使用 `SADD` 记录成功抢购的用户
+
+:::tip 为什么使用 Lua 脚本
+库存判断、重复下单校验、库存扣减和用户记录包含多条 Redis 命令。将这些命令放入同一个 Lua 脚本执行，可以保证整个资格校验过程的原子性，避免多个请求并发执行时出现超卖或重复下单。
+:::
+
+### 代码实现
+
+![异步秒杀流程](image-9.png)
+
+根据上述流程，异步秒杀可以分为以下四个实现步骤：
+
+1. **[同步秒杀库存](#async-seckill-sync-stock)**：新增秒杀券时，在保存数据库数据的同时，将初始库存写入 Redis
+2. **[校验下单资格](#async-seckill-check-qualification)**：使用 Lua 脚本原子完成库存校验、一人一单校验、Redis 库存扣减和用户记录
+3. **[提交订单任务](#async-seckill-submit-order)**：为请求生成全局唯一订单 ID；资格校验通过后，将订单信息封装为对象写入 JVM 阻塞队列
+4. **[异步创建订单](#async-seckill-create-order)**：启动后台线程持续消费订单任务，在事务中扣减数据库库存并保存订单
+
+<span id="async-seckill-sync-stock"></span>
+
+#### 1. 同步秒杀库存
+
+新增秒杀券时，在保存数据库数据后，将库存同步写入 Redis：
+
+```java
+@Service
+public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher>
+        implements IVoucherService {
+
+    private static final String SECKILL_STOCK_KEY = "seckill:stock:";
+
+    @Resource
+    private ISeckillVoucherService seckillVoucherService;
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    @Transactional
+    public void addSeckillVoucher(Voucher voucher) {
+        // 1. 保存优惠券基本信息
+        save(voucher);
+
+        // 2. 保存秒杀券扩展信息
+        SeckillVoucher seckillVoucher = new SeckillVoucher();
+        seckillVoucher.setVoucherId(voucher.getId());
+        seckillVoucher.setStock(voucher.getStock());
+        seckillVoucher.setBeginTime(voucher.getBeginTime());
+        seckillVoucher.setEndTime(voucher.getEndTime());
+        seckillVoucherService.save(seckillVoucher);
+
+        // 3. 将秒杀库存写入 Redis
+        stringRedisTemplate.opsForValue().set(
+                SECKILL_STOCK_KEY + voucher.getId(),
+                voucher.getStock().toString()
+        );
+    }
+}
+```
+
+<span id="async-seckill-check-qualification"></span>
+
+#### 2. 校验下单资格
+
+**编写 Lua 脚本：**
+
+在 `src/main/resources` 目录下创建 `seckill.lua`，原子完成资格校验和 Redis 数据更新：
+
+```lua
+-- ARGV[1]：优惠券 ID
+-- ARGV[2]：用户 ID
+local voucherId = ARGV[1]
+local userId = ARGV[2]
+
+local stockKey = 'seckill:stock:' .. voucherId
+local orderKey = 'seckill:order:' .. voucherId
+
+-- 1. 判断库存是否存在且大于 0
+local stock = redis.call('GET', stockKey)
+if not stock or tonumber(stock) <= 0 then
+    return 1
+end
+
+-- 2. 判断用户是否已经下单
+if redis.call('SISMEMBER', orderKey, userId) == 1 then
+    return 2
+end
+
+-- 3. 扣减 Redis 库存
+redis.call('DECR', stockKey)
+
+-- 4. 记录成功抢购的用户
+redis.call('SADD', orderKey, userId)
+
+return 0
+```
+
+脚本使用返回值区分执行结果：
+
+| 返回值 | 含义 |
+|-------|------|
+| `0` | 资格校验成功 |
+| `1` | 库存不存在或库存不足 |
+| `2` | 用户重复下单 |
+
+**加载 Lua 脚本：**
+
+在 `VoucherOrderServiceImpl` 中使用 `DefaultRedisScript` 加载脚本。脚本内容会被缓存，执行时 Redis 客户端会优先使用 `EVALSHA`，不需要每次发送完整脚本：
+
+```java
+private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+
+static {
+    SECKILL_SCRIPT = new DefaultRedisScript<>();
+    SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
+    SECKILL_SCRIPT.setResultType(Long.class);
+}
+```
+
+<span id="async-seckill-submit-order"></span>
+
+#### 3. 提交订单任务
+
+在 `VoucherOrderServiceImpl` 中创建阻塞队列。秒杀请求执行 Lua 脚本，通过资格校验后，将订单对象写入队列并立即返回订单 ID：
+
+```java
+@Slf4j
+@Service
+public class VoucherOrderServiceImpl
+        extends ServiceImpl<VoucherOrderMapper, VoucherOrder>
+        implements IVoucherOrderService {
+
+    private static final int QUEUE_CAPACITY = 1024 * 1024;
+    private static final String ORDER_ID_PREFIX = "order";
+
+    private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    private static final BlockingQueue<VoucherOrder> ORDER_TASKS =
+            new ArrayBlockingQueue<>(QUEUE_CAPACITY);
+
+    static {
+        SECKILL_SCRIPT = new DefaultRedisScript<>();
+        SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
+        SECKILL_SCRIPT.setResultType(Long.class);
+    }
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private RedisIdWorker redisIdWorker;
+
+    @Override
+    public Result seckillVoucher(Long voucherId) {
+        Long userId = UserHolder.getUser().getId();
+        long orderId = redisIdWorker.nextId(ORDER_ID_PREFIX);
+
+        // KEYS 为空，优惠券 ID 和用户 ID 通过 ARGV 传入脚本
+        Long result = stringRedisTemplate.execute(
+                SECKILL_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString()
+        );
+
+        if (result == null) {
+            return Result.fail("系统繁忙，请稍后重试！");
+        }
+        if (result == 1L) {
+            return Result.fail("库存不足！");
+        }
+        if (result == 2L) {
+            return Result.fail("不能重复下单！");
+        }
+
+        // Lua 脚本校验通过，将完整订单信息写入阻塞队列
+        VoucherOrder order = new VoucherOrder();
+        order.setId(orderId);
+        order.setUserId(userId);
+        order.setVoucherId(voucherId);
+        ORDER_TASKS.add(order);
+
+        return Result.ok(orderId);
+    }
+}
+```
+
+<span id="async-seckill-create-order"></span>
+
+#### 4. 异步创建订单
+
+在同一个 Service 中创建单线程消费者。Spring 完成依赖注入后启动线程，持续从阻塞队列获取订单，并在事务中完成数据库操作：
+
+```java
+private static final ExecutorService SECKILL_ORDER_EXECUTOR =
+        Executors.newSingleThreadExecutor();
+
+@Resource
+private ISeckillVoucherService seckillVoucherService;
+
+@Resource
+private TransactionTemplate transactionTemplate;
+
+/**
+ * Spring 完成依赖注入后启动订单消费者
+ */
+@PostConstruct
+private void init() {
+    SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
+}
+
+@PreDestroy
+private void destroy() {
+    SECKILL_ORDER_EXECUTOR.shutdownNow();
+}
+
+/**
+ * 后台线程持续从阻塞队列中获取订单
+ */
+private class VoucherOrderHandler implements Runnable {
+    @Override
+    public void run() {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                VoucherOrder order = ORDER_TASKS.take();
+
+                // 使用编程式事务，避免同类方法自调用导致事务失效
+                transactionTemplate.executeWithoutResult(status ->
+                        createVoucherOrder(order)
+                );
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (Exception e) {
+                log.error("处理秒杀订单异常", e);
+            }
+        }
+    }
+}
+
+/**
+ * 在事务中扣减数据库库存并创建订单
+ */
+private void createVoucherOrder(VoucherOrder order) {
+    Long userId = order.getUserId();
+    Long voucherId = order.getVoucherId();
+
+    // 数据库再次校验一人一单，作为兜底
+    int count = query()
+            .eq("user_id", userId)
+            .eq("voucher_id", voucherId)
+            .count();
+    if (count > 0) {
+        log.warn("用户已购买该优惠券，userId={}, voucherId={}", userId, voucherId);
+        return;
+    }
+
+    // 使用乐观锁扣减数据库库存，避免超卖
+    boolean success = seckillVoucherService.update()
+            .setSql("stock = stock - 1")
+            .eq("voucher_id", voucherId)
+            .gt("stock", 0)
+            .update();
+    if (!success) {
+        log.warn("数据库库存不足，voucherId={}", voucherId);
+        return;
+    }
+
+    save(order);
+}
+```
+
+:::tip 后台线程中的用户信息
+`UserHolder` 基于 `ThreadLocal` 保存登录用户，只能在处理 HTTP 请求的线程中获取数据。后台消费者运行在另一个线程，因此必须从队列中的 `VoucherOrder` 对象获取用户 ID，不能再次调用 `UserHolder.getUser()`。
+:::
+
+:::warning 阻塞队列的局限
+JVM 阻塞队列主要存在以下两个问题：
+
+1. **内存限制**：阻塞队列使用 JVM 内存保存订单任务，队列容量有限。瞬时请求量过大时，可能导致队列堆积、队列写满，甚至引发内存溢出
+2. **数据安全**：阻塞队列中的数据没有持久化，服务宕机或重启会造成订单任务丢失；Lua 脚本执行成功与订单入队也不是原子操作，可能出现 Redis 已扣减库存但订单未入队的情况
+
+因此，该方案适合用于理解异步秒杀的基本流程，生产环境还需要使用具备持久化、消费确认和异常重试能力的消息队列，并配合消费幂等与失败补偿机制。下文将继续使用 Redis 消息队列改进这一方案。
+:::
+
 ## Redis 消息队列实现异步秒杀
