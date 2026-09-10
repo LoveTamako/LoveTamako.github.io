@@ -2914,6 +2914,9 @@ private void destroy() {
 private class VoucherOrderHandler implements Runnable {
     @Override
     public void run() {
+        // 服务重启后先恢复当前消费者遗留的 Pending 消息
+        handlePendingList();
+
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 VoucherOrder order = ORDER_TASKS.take();
@@ -2977,3 +2980,456 @@ JVM 阻塞队列主要存在以下两个问题：
 :::
 
 ## Redis 消息队列实现异步秒杀
+
+前文使用 JVM 阻塞队列异步创建订单，虽然降低了接口响应时间，但订单任务只保存在当前进程的内存中。服务一旦宕机或重启，尚未处理的任务就会丢失；在集群模式下，各实例之间也无法共享队列。
+
+本节使用 Redis Stream 替换 JVM 阻塞队列，将下单资格校验、Redis 库存扣减和订单消息入队放入同一个 Lua 脚本中执行，再由后台消费者异步创建订单。
+
+### 消息队列概述
+
+消息队列（Message Queue，MQ）用于在不同组件之间传递消息，最基本的模型包含以下三个角色：
+
+| 角色 | 作用 |
+|------|------|
+| **生产者（Producer）** | 创建消息并将消息发送到队列 |
+| **消息代理（Message Broker）** | 存储、管理并转发消息 |
+| **消费者（Consumer）** | 从队列中获取消息并完成业务处理 |
+
+引入消息队列后，秒杀请求线程只负责校验下单资格并发送订单消息，无需等待数据库操作完成。订单消费者可以按照自身处理能力异步写入数据库，从而实现**异步处理、流量削峰和服务解耦**。
+
+:::tip 技术选型
+RabbitMQ、RocketMQ 和 Kafka 是生产环境中更常见的消息中间件。本节使用 Redis 是为了衔接前文的秒杀业务并学习消息队列的核心机制，不代表 Redis Stream 可以完全替代专业消息中间件。
+:::
+
+Redis 中常见的消息队列实现方式有三种：
+
+- `List`：利用双向链表模拟队列
+- `Pub/Sub`：基于发布订阅实现消息广播
+- `Stream`：提供消息持久化、消费者组和消费确认等能力
+
+### 基于 List 的消息队列
+
+Redis `List` 是双向链表，可以从一端写入、另一端取出，从而形成先进先出队列。常见组合如下：
+
+| 生产命令 | 消费命令 | 说明 |
+|---------|---------|------|
+| `LPUSH` | `RPOP` / `BRPOP` | 从左侧写入，从右侧读取 |
+| `RPUSH` | `LPOP` / `BLPOP` | 从右侧写入，从左侧读取 |
+
+```bash
+# 生产者：从右侧写入消息
+RPUSH queue.orders '{"orderId":1001,"userId":10,"voucherId":1}'
+
+# 消费者：从左侧阻塞读取；0 表示一直等待
+BLPOP queue.orders 0
+```
+
+普通的 `LPOP`、`RPOP` 在队列为空时会立即返回 `nil`。消费者如果需要等待新消息，应使用阻塞命令 `BLPOP` 或 `BRPOP`，避免不断轮询 Redis。
+
+**优点：**
+
+- 数据存储在 Redis 中，不受单个 JVM 进程内存的限制
+- 基于链表操作，可以保证单个队列内消息有序
+- 支持多个消费者竞争消费，提高处理能力
+
+**局限：**
+
+- 消息弹出后会立即从队列删除，没有消费确认机制；消费者取出消息后宕机会造成消息丢失
+- 同一条消息只能交给一个消费者处理，不支持发布订阅式的广播消费
+- 缺少消费者组、失败重试和 Pending List 等消息管理能力
+
+### 基于 Pub/Sub 的消息队列
+
+Redis `Pub/Sub`（发布订阅）是一种广播模型。消费者订阅一个或多个频道，生产者向频道发布消息后，所有在线订阅者都可以收到消息。
+
+```bash
+# 订阅指定频道
+SUBSCRIBE order.created
+
+# 按模式订阅频道
+PSUBSCRIBE order.*
+
+# 向频道发布消息
+PUBLISH order.created '{"orderId":1001}'
+```
+
+**优点：**
+
+- 支持多生产者、多消费者和一对多广播
+- 消息实时推送，实现简单，延迟较低
+
+**局限：**
+
+- 消息不会持久化，发布时不在线的消费者无法收到历史消息
+- 采用至多一次投递，消费失败后无法重新获取消息
+- 缺少消息确认和可靠的消息堆积能力，不适合承载订单等关键业务消息
+
+### 基于 Stream 的消息队列
+
+`Stream` 是 Redis 5.0 引入的日志型数据结构。每条消息都会写入 Stream 并获得一个唯一 ID，消息不会因为某个消费者读取而立即删除，因此既可以读取历史消息，也可以通过消费者组实现消息分发、消费确认和故障恢复。
+
+#### 基本操作
+
+| 命令 | 作用 |
+|------|------|
+| `XADD` | 向 Stream 追加消息 |
+| `XREAD` | 从指定位置读取消息，可阻塞等待 |
+| `XRANGE` | 按 ID 范围查询历史消息 |
+| `XLEN` | 获取 Stream 中的消息数量 |
+| `XTRIM` | 裁剪 Stream，避免消息无限增长 |
+
+```bash
+# 添加消息；* 表示由 Redis 自动生成消息 ID
+XADD stream.orders * id 1001 userId 10 voucherId 1
+
+# 查询全部历史消息
+XRANGE stream.orders - +
+
+# 从最新位置开始阻塞等待新消息
+XREAD COUNT 1 BLOCK 2000 STREAMS stream.orders $
+```
+
+消息 ID 通常采用 `<毫秒时间戳>-<序列号>` 的格式，例如 `1725872400000-0`。在不使用消费者组时，客户端需要自行记录上一次读取到的 ID；如果每次都从 `$` 开始读取，可能漏掉两次读取之间到达的消息。
+
+#### 消费者组
+
+消费者组（Consumer Group）是 Stream 实现可靠消费的核心机制：
+
+- 同一个组内的消费者竞争消费，每条新消息只会交给其中一个消费者
+- 不同消费者组可以分别读取同一条消息，实现一条消息被多个业务独立处理
+- 消息交付后、确认前会进入 Pending Entries List（PEL）
+- 消费者处理成功后使用 `XACK` 确认，消息才会从该组的 PEL 中移除
+
+```bash
+# 创建消费者组：从 ID 0 开始读取历史消息；MKSTREAM 会在 Stream 不存在时自动创建
+XGROUP CREATE stream.orders g1 0 MKSTREAM
+
+# c1 读取 g1 组中尚未投递的新消息；> 表示只读取新消息
+XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS stream.orders >
+
+# 处理成功后确认消息
+XACK stream.orders g1 1725872400000-0
+
+# 查看组内尚未确认的消息
+XPENDING stream.orders g1
+```
+
+创建消费者组时，起始 ID 的含义如下：
+
+| 起始 ID | 含义 | 适用场景 |
+|---------|------|---------|
+| `0` | 从 Stream 中的第一条消息开始消费 | 不能遗漏已有消息的业务 |
+| `$` | 只消费创建组之后到达的新消息 | 明确不需要历史消息的业务 |
+
+:::tip `XACK` 不会删除消息
+`XACK` 只表示某个消费者组已经处理完成，并将消息从该组的 PEL 中移除；原始消息仍保留在 Stream 中。需要结合 `XTRIM`、`MAXLEN` 或定期清理策略控制 Stream 长度。
+:::
+
+#### Pending List 与故障恢复
+
+消费者读取消息后如果发生异常，没有执行 `XACK`，消息就会留在 PEL 中。消费者恢复后可以将读取位置指定为 `0`，重新处理分配给自己的未确认消息：
+
+```bash
+XREADGROUP GROUP g1 c1 COUNT 1 STREAMS stream.orders 0
+```
+
+在多实例部署中，每个实例应使用唯一的消费者名称。若某个实例永久下线，其 Pending 消息仍归属于原消费者，需要使用 `XAUTOCLAIM`（Redis 6.2+）或 `XCLAIM` 将空闲超时的消息转移给存活消费者。
+
+### 三种方案对比
+
+| 对比项 | `List` | `Pub/Sub` | `Stream` |
+|-------|--------|-----------|----------|
+| 消息持久化 | 支持，可靠性取决于 Redis 持久化配置 | 不支持 | 支持，可靠性取决于 Redis 持久化配置 |
+| 消费模式 | 竞争消费 | 广播消费 | 消费者组竞争消费，也支持多组独立消费 |
+| 阻塞读取 | 支持 | 由服务端实时推送 | 支持 |
+| 消费确认 | 不支持 | 不支持 | 支持 `XACK` |
+| 失败恢复 | 不支持 | 不支持 | 支持 PEL、`XCLAIM` / `XAUTOCLAIM` |
+| 消息回溯 | 不支持 | 不支持 | 支持按消息 ID 查询 |
+| 适用场景 | 简单、非关键任务 | 实时通知、状态广播 | 需要较高可靠性的异步任务 |
+
+秒杀订单不能容忍消费者短暂离线就直接丢失消息，因此本节选择 **Redis Stream + 消费者组**。
+
+### 使用 Stream 改造异步秒杀
+
+改造后的处理流程如下：
+
+| 阶段 | 执行线程 | 处理内容 |
+|------|---------|---------|
+| 资格校验与入队 | HTTP 请求线程 | Lua 脚本原子完成库存校验、一人一单校验、Redis 库存扣减、用户记录和 `XADD` 入队 |
+| 订单持久化 | Stream 消费线程 | 从消费者组读取订单消息，在事务中扣减数据库库存并创建订单 |
+| 消费确认 | Stream 消费线程 | 数据库事务成功后执行 `XACK`；失败时消息保留在 PEL 中等待重试 |
+
+与 JVM 阻塞队列方案相比，关键变化是把“扣减 Redis 库存”和“提交订单任务”合并到同一个 Lua 脚本中。只要脚本返回成功，订单消息就已经写入 Stream，避免了 Redis 扣减成功但 JVM 入队失败的数据窗口。
+
+#### 1. 初始化 Stream 和消费者组
+
+消费者启动前需要先创建 Stream 和消费者组。该命令只需执行一次，重复创建会返回 `BUSYGROUP`：
+
+```bash
+XGROUP CREATE stream.orders g1 0 MKSTREAM
+```
+
+本例约定：
+
+| 配置项 | 值 | 说明 |
+|-------|----|------|
+| Stream Key | `stream.orders` | 保存秒杀订单消息 |
+| 消费者组 | `g1` | 订单处理组 |
+| 消费者 | `c1` | 当前应用实例中的订单消费者 |
+
+#### 2. 修改秒杀 Lua 脚本
+
+修改 `src/main/resources/seckill.lua`，将订单 ID 作为第三个参数传入，并在资格校验通过后直接向 Stream 写入订单消息：
+
+```lua
+-- ARGV[1]：优惠券 ID
+-- ARGV[2]：用户 ID
+-- ARGV[3]：订单 ID
+local voucherId = ARGV[1]
+local userId = ARGV[2]
+local orderId = ARGV[3]
+
+local stockKey = 'seckill:stock:' .. voucherId
+local orderKey = 'seckill:order:' .. voucherId
+
+-- 1. 判断库存是否存在且大于 0
+local stock = redis.call('GET', stockKey)
+if not stock or tonumber(stock) <= 0 then
+    return 1
+end
+
+-- 2. 判断用户是否已经下单
+if redis.call('SISMEMBER', orderKey, userId) == 1 then
+    return 2
+end
+
+-- 3. 扣减 Redis 库存并记录下单用户
+redis.call('DECR', stockKey)
+redis.call('SADD', orderKey, userId)
+
+-- 4. 将订单消息写入 Stream
+redis.call(
+    'XADD', 'stream.orders', '*',
+    'id', orderId,
+    'userId', userId,
+    'voucherId', voucherId
+)
+
+return 0
+```
+
+脚本返回值保持不变：
+
+| 返回值 | 含义 |
+|-------|------|
+| `0` | 校验通过，Redis 库存已扣减且订单消息已入队 |
+| `1` | 库存不存在或库存不足 |
+| `2` | 用户重复下单 |
+
+:::tip 为什么要在 Lua 脚本中执行 `XADD`
+如果先执行 Lua 脚本扣减库存，再由 Java 代码单独调用 `XADD`，两个操作之间仍存在服务宕机窗口。把 `XADD` 放入同一个脚本后，资格校验、库存变更和消息入队会作为一个整体原子执行。
+:::
+
+#### 3. 提交秒杀请求
+
+请求线程只需要生成订单 ID、执行 Lua 脚本并返回结果，不再创建 `VoucherOrder` 对象或写入 JVM 阻塞队列：
+
+```java
+private static final String ORDER_ID_PREFIX = "order";
+
+private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+
+static {
+    SECKILL_SCRIPT = new DefaultRedisScript<>();
+    SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
+    SECKILL_SCRIPT.setResultType(Long.class);
+}
+
+@Resource
+private StringRedisTemplate stringRedisTemplate;
+
+@Resource
+private RedisIdWorker redisIdWorker;
+
+@Override
+public Result seckillVoucher(Long voucherId) {
+    Long userId = UserHolder.getUser().getId();
+    long orderId = redisIdWorker.nextId(ORDER_ID_PREFIX);
+
+    Long result = stringRedisTemplate.execute(
+            SECKILL_SCRIPT,
+            Collections.emptyList(),
+            voucherId.toString(),
+            userId.toString(),
+            Long.toString(orderId)
+    );
+
+    if (result == null) {
+        return Result.fail("系统繁忙，请稍后重试！");
+    }
+    if (result == 1L) {
+        return Result.fail("库存不足！");
+    }
+    if (result == 2L) {
+        return Result.fail("不能重复下单！");
+    }
+
+    return Result.ok(orderId);
+}
+```
+
+接口返回的订单 ID 表示订单任务已经进入 Stream，并不代表订单已经写入数据库。客户端如果需要展示最终结果，应通过订单查询接口确认订单状态。
+
+#### 4. 消费订单消息
+
+后台线程以 `g1` 组中的 `c1` 消费者身份读取新消息。订单创建成功后执行 `XACK`；发生异常时进入 Pending List 处理流程。
+
+```java
+private static final String STREAM_ORDERS = "stream.orders";
+private static final String GROUP_NAME = "g1";
+private static final String CONSUMER_NAME = "c1";
+
+private static final ExecutorService SECKILL_ORDER_EXECUTOR =
+        Executors.newSingleThreadExecutor();
+
+@Resource
+private TransactionTemplate transactionTemplate;
+
+@PostConstruct
+private void init() {
+    SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
+}
+
+@PreDestroy
+private void destroy() {
+    SECKILL_ORDER_EXECUTOR.shutdownNow();
+}
+
+private class VoucherOrderHandler implements Runnable {
+    @Override
+    public void run() {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                // ">" 对应 ReadOffset.lastConsumed()，只读取尚未投递的新消息
+                List<MapRecord<String, Object, Object>> records =
+                        stringRedisTemplate.opsForStream().read(
+                                Consumer.from(GROUP_NAME, CONSUMER_NAME),
+                                StreamReadOptions.empty()
+                                        .count(1)
+                                        .block(Duration.ofSeconds(2)),
+                                StreamOffset.create(
+                                        STREAM_ORDERS,
+                                        ReadOffset.lastConsumed()
+                                )
+                        );
+
+                if (records == null || records.isEmpty()) {
+                    // 没有新消息时顺便重试未确认消息
+                    handlePendingList();
+                    continue;
+                }
+
+                handleRecord(records.get(0));
+            } catch (Exception e) {
+                log.error("处理 Stream 订单消息异常", e);
+                handlePendingList();
+            }
+        }
+    }
+}
+
+/**
+ * 处理单条订单消息；数据库事务提交成功后再确认消息
+ */
+private void handleRecord(MapRecord<String, Object, Object> record) {
+    VoucherOrder order = BeanUtil.fillBeanWithMap(
+            record.getValue(),
+            new VoucherOrder(),
+            true
+    );
+
+    transactionTemplate.executeWithoutResult(status ->
+            createVoucherOrder(order)
+    );
+
+    stringRedisTemplate.opsForStream().acknowledge(
+            STREAM_ORDERS,
+            GROUP_NAME,
+            record.getId()
+    );
+}
+```
+
+`createVoucherOrder(order)` 继续复用上一节的数据库兜底逻辑：先检查一人一单，再使用 `stock > 0` 条件扣减数据库库存，最后保存订单。事务失败时异常会向外抛出，因此不会执行 `XACK`。
+
+#### 5. 处理 Pending List
+
+读取新消息发生异常后，应优先处理当前消费者尚未确认的消息。此时将读取位置指定为 `0`，且不要设置阻塞时间：
+
+```java
+private void handlePendingList() {
+    while (!Thread.currentThread().isInterrupted()) {
+        try {
+            // "0" 表示读取分配给当前消费者、但尚未确认的消息
+            List<MapRecord<String, Object, Object>> records =
+                    stringRedisTemplate.opsForStream().read(
+                            Consumer.from(GROUP_NAME, CONSUMER_NAME),
+                            StreamReadOptions.empty().count(1),
+                            StreamOffset.create(
+                                    STREAM_ORDERS,
+                                    ReadOffset.from("0")
+                            )
+                    );
+
+            if (records == null || records.isEmpty()) {
+                return;
+            }
+
+            handleRecord(records.get(0));
+        } catch (Exception e) {
+            log.error("处理 Pending 订单消息异常", e);
+            return;
+        }
+    }
+}
+```
+
+处理成功后 `handleRecord()` 会执行 `XACK`，下一次读取将继续处理剩余 Pending 消息；如果仍然失败则保留消息，等待后续重试或人工处理。
+
+:::warning 避免无限重试
+示例只展示 Pending List 的基本处理方式。生产环境必须记录投递次数并设置最大重试次数，持续失败的“毒消息”应转入死信队列或异常表，否则单条消息可能反复失败并占用消费线程。
+:::
+
+### 可靠性与生产实践
+
+Redis Stream 提供了比 JVM 队列更完整的可靠消费能力，但仍需补充以下工程措施：
+
+| 风险 | 当前机制 | 生产环境建议 |
+|------|---------|-------------|
+| 消费者处理失败 | 未确认消息保留在 PEL | 设置重试上限、退避策略和死信队列 |
+| 消息重复投递 | 数据库再次校验一人一单 | 为 `(user_id, voucher_id)` 添加唯一索引，保证消费幂等 |
+| 消费者永久下线 | Pending 消息仍归属于原消费者 | 使用唯一消费者名称，并通过 `XAUTOCLAIM` 转移超时消息 |
+| Stream 无限增长 | 消息默认不会自动删除 | 使用 `MAXLEN` / `XTRIM` 裁剪，并结合业务保留周期归档 |
+| Redis 宕机丢数据 | 消息保存在 Redis | 合理配置 AOF、主从复制和高可用；关键业务优先使用专业消息中间件 |
+| Redis 与数据库不一致 | 数据库层再次校验库存和订单 | 增加定时对账、失败补偿和告警机制 |
+
+:::warning Redis Cluster 注意事项
+Lua 脚本访问多个 Key 时，这些 Key 在 Redis Cluster 中必须位于同一个哈希槽。集群部署时需要统一设计 Hash Tag，或调整业务拆分方式；本节示例以单节点 Redis 为前提。
+:::
+
+### 小结
+
+| 关键点 | 实现方式 |
+|-------|---------|
+| 请求快速返回 | Redis + Lua 同步完成下单资格校验 |
+| 原子提交任务 | 在 Lua 脚本中同时扣减 Redis 库存并执行 `XADD` |
+| 异步创建订单 | 消费者组读取 Stream，由后台线程写入数据库 |
+| 消费失败恢复 | 未确认消息进入 PEL，成功处理后执行 `XACK` |
+| 最终数据安全 | 数据库乐观锁、唯一索引、消费幂等和失败补偿共同兜底 |
+
+通过这次改造，秒杀接口只承担“判断资格并提交订单任务”的职责，数据库写入由 Stream 消费者异步完成。系统吞吐量和任务可靠性都优于 JVM 阻塞队列方案，但 Redis Stream 仍不是绝对可靠的分布式事务方案，核心业务必须保留数据库约束和补偿机制。
+
+**参考资料：**
+
+- [Redis Streams 官方文档](https://redis.io/docs/latest/develop/data-types/streams/)
+- [Redis Pub/Sub 官方文档](https://redis.io/docs/latest/develop/pubsub/)
