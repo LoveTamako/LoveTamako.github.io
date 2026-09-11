@@ -18,7 +18,7 @@ defineProps<{
         :href="item.link"
         :title="item.title"
       >
-        {{ item.title }}
+        <span class="outline-link-text">{{ item.title }}</span>
       </a>
 
       <CollapsibleOutlineChildren
@@ -42,15 +42,21 @@ defineProps<{
 }
 
 .outline-link {
+  position: relative;
   display: block;
-  overflow: hidden;
   color: var(--vp-c-text-2);
   font-size: 13px;
   font-weight: 400;
   line-height: 28px;
-  text-overflow: ellipsis;
   white-space: nowrap;
   transition: color 0.25s;
+}
+
+.outline-link-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .outline-link:hover,

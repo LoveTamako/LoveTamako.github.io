@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { getScrollOffset, useData } from 'vitepress'
 import { useLayout, type DefaultTheme } from 'vitepress/theme'
 import CollapsibleOutlineChildren from './CollapsibleOutlineChildren.vue'
@@ -8,11 +8,8 @@ import MobileCollapsibleOutline from './MobileCollapsibleOutline.vue'
 const { theme } = useData<DefaultTheme.Config>()
 const { headers, hasLocalNav } = useLayout()
 
-const container = ref<HTMLElement>()
 const activeLink = ref<string | null>(null)
 const expandedGroup = ref<string | null>(null)
-const markerTop = ref(33)
-const markerVisible = ref(false)
 const mounted = ref(false)
 
 const outlineTitle = computed(() => {
@@ -28,6 +25,9 @@ const outlineTitle = computed(() => {
 let animationFrame = 0
 let navigationTarget: string | null = null
 let navigationEndTimer: ReturnType<typeof setTimeout> | undefined
+let pendingExpandedGroup: string | null = null
+let groupIsCollapsing = false
+let groupTransitionFrame = 0
 
 function containsLink(item: DefaultTheme.OutlineItem, link: string): boolean {
   return item.link === link || Boolean(item.children?.some((child) => containsLink(child, link)))
@@ -37,49 +37,52 @@ function findActiveGroup(link: string) {
   return headers.value.find((item) => containsLink(item, link))
 }
 
-function expandGroupForLink(link: string | null) {
-  if (!link) {
+function requestExpandedGroup(link: string | null) {
+  if (groupIsCollapsing) {
+    pendingExpandedGroup = link
+    return
+  }
+
+  if (expandedGroup.value && expandedGroup.value !== link) {
+    pendingExpandedGroup = link
+    groupIsCollapsing = true
     expandedGroup.value = null
     return
   }
 
-  const group = findActiveGroup(link)
-  expandedGroup.value = group?.children?.length ? group.link : null
+  expandedGroup.value = link
 }
 
-function updateMarker() {
-  if (!activeLink.value || !container.value) {
-    markerVisible.value = false
-    markerTop.value = 33
+function finishGroupCollapse() {
+  if (!groupIsCollapsing) return
+
+  groupIsCollapsing = false
+  const nextGroup = pendingExpandedGroup
+  pendingExpandedGroup = null
+
+  if (!nextGroup) return
+
+  groupTransitionFrame = requestAnimationFrame(() => {
+    groupTransitionFrame = 0
+    requestExpandedGroup(nextGroup)
+  })
+}
+
+function expandGroupForLink(link: string | null) {
+  if (!link) {
+    requestExpandedGroup(null)
     return
   }
 
-  const link = [...container.value.querySelectorAll<HTMLAnchorElement>('a[href]')]
-    .find((item) => item.getAttribute('href') === activeLink.value)
-  const content = container.value.querySelector<HTMLElement>('.content')
-
-  if (!link || !content) {
-    markerVisible.value = false
-    return
-  }
-
-  const linkRect = link.getBoundingClientRect()
-  const contentRect = content.getBoundingClientRect()
-
-  markerTop.value = linkRect.top - contentRect.top + (linkRect.height - 18) / 2
-  markerVisible.value = true
+  const group = findActiveGroup(link)
+  requestExpandedGroup(group?.children?.length ? group.link : null)
 }
 
 function setActiveLink(link: string | null) {
-  if (activeLink.value === link) {
-    updateMarker()
-    return
-  }
+  if (activeLink.value === link) return
 
   activeLink.value = link
   expandGroupForLink(link)
-
-  nextTick(updateMarker)
 }
 
 function finishNavigation() {
@@ -116,7 +119,6 @@ function handleOutlineClick(event: MouseEvent) {
   navigationTarget = link
   activeLink.value = link
   expandGroupForLink(link)
-  nextTick(updateMarker)
 
   // Fallback for browsers that do not emit `scrollend`.
   scheduleNavigationEnd(500)
@@ -127,8 +129,7 @@ function returnToTop() {
   animationFrame = 0
   navigationTarget = '#'
   activeLink.value = null
-  expandedGroup.value = null
-  markerVisible.value = false
+  requestExpandedGroup(null)
   scheduleNavigationEnd(500)
 
   const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -189,17 +190,20 @@ function queueActiveLinkUpdate() {
 }
 
 function toggleGroup(link: string) {
-  expandedGroup.value = expandedGroup.value === link ? null : link
-  nextTick(updateMarker)
+  requestExpandedGroup(expandedGroup.value === link ? null : link)
 }
 
 watch(headers, () => {
   navigationTarget = null
   if (navigationEndTimer) clearTimeout(navigationEndTimer)
   navigationEndTimer = undefined
+  pendingExpandedGroup = null
+  groupIsCollapsing = false
+  if (groupTransitionFrame) cancelAnimationFrame(groupTransitionFrame)
+  groupTransitionFrame = 0
   activeLink.value = null
   expandedGroup.value = null
-  nextTick(queueActiveLinkUpdate)
+  queueActiveLinkUpdate()
 })
 
 onMounted(() => {
@@ -216,6 +220,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('scrollend', finishNavigation)
   window.removeEventListener('resize', queueActiveLinkUpdate)
   if (navigationEndTimer) clearTimeout(navigationEndTimer)
+  if (groupTransitionFrame) cancelAnimationFrame(groupTransitionFrame)
   if (animationFrame) cancelAnimationFrame(animationFrame)
 })
 </script>
@@ -223,18 +228,11 @@ onBeforeUnmount(() => {
 <template>
   <nav
     v-if="hasLocalNav"
-    ref="container"
     class="CollapsibleOutline"
     aria-labelledby="collapsible-outline-title"
     @click="handleOutlineClick"
   >
     <div class="content">
-      <div
-        class="outline-marker"
-        :class="{ visible: markerVisible }"
-        :style="{ top: `${markerTop}px` }"
-      />
-
       <div
         id="collapsible-outline-title"
         class="outline-title"
@@ -253,7 +251,7 @@ onBeforeUnmount(() => {
               :href="item.link"
               :title="item.title"
             >
-              {{ item.title }}
+              <span class="outline-link-text">{{ item.title }}</span>
             </a>
 
             <button
@@ -269,7 +267,7 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <Transition name="outline-children">
+          <Transition name="outline-children" @after-leave="finishGroupCollapse">
             <CollapsibleOutlineChildren
               v-if="item.children?.length && expandedGroup === item.link"
               :id="`outline-group-${index}`"
@@ -332,15 +330,51 @@ onBeforeUnmount(() => {
 }
 
 .outline-link {
+  position: relative;
   display: block;
-  overflow: hidden;
   color: var(--vp-c-text-2);
   font-size: 14px;
   font-weight: 400;
   line-height: 32px;
-  text-overflow: ellipsis;
   white-space: nowrap;
   transition: color 0.25s;
+}
+
+.outline-link-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outline-link::before,
+:deep(.outline-children .outline-link::before) {
+  position: absolute;
+  top: 7px;
+  width: 2px;
+  height: 18px;
+  border-radius: 2px;
+  content: "";
+  opacity: 0;
+  background-color: var(--vp-c-brand-1);
+  transition: opacity 0.15s;
+}
+
+.outline-link::before {
+  left: -17px;
+}
+
+:deep(.outline-children .outline-link) {
+  position: relative;
+}
+
+:deep(.outline-children .outline-link::before) {
+  left: -31px;
+}
+
+.outline-link.active::before,
+:deep(.outline-children .outline-link.active::before) {
+  opacity: 1;
 }
 
 .outline-link:hover,
@@ -386,26 +420,14 @@ onBeforeUnmount(() => {
   transform: translateY(2px) rotate(225deg);
 }
 
-.outline-marker {
-  position: absolute;
-  left: -1px;
-  z-index: 2;
-  width: 2px;
-  height: 18px;
-  border-radius: 2px;
-  opacity: 0;
-  background-color: var(--vp-c-brand-1);
-  transition: top 0.25s cubic-bezier(0, 1, 0.5, 1), opacity 0.2s;
+.outline-children-enter-active {
+  overflow: hidden;
+  transition: opacity 0.16s ease-out, transform 0.16s ease-out;
 }
 
-.outline-marker.visible {
-  opacity: 1;
-}
-
-.outline-children-enter-active,
 .outline-children-leave-active {
   overflow: hidden;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: opacity 0.12s ease-in, transform 0.12s ease-in;
 }
 
 .outline-children-enter-from,
@@ -415,7 +437,8 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .outline-marker,
+  .outline-link::before,
+  :deep(.outline-children .outline-link::before),
   .outline-children-enter-active,
   .outline-children-leave-active {
     transition: none;

@@ -321,10 +321,14 @@ onBeforeUnmount(() => {
   transform: translateY(-8px);
 }
 
-.outline-children-enter-active,
+.outline-children-enter-active {
+  overflow: hidden;
+  transition: opacity 0.16s ease-out, transform 0.16s ease-out;
+}
+
 .outline-children-leave-active {
   overflow: hidden;
-  transition: opacity 0.16s ease, transform 0.16s ease;
+  transition: opacity 0.12s ease-in, transform 0.12s ease-in;
 }
 
 .outline-children-enter-from,
