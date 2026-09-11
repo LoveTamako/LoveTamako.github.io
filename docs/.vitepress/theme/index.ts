@@ -4,6 +4,7 @@ import './style.css'
 import Giscus from './components/Giscus.vue'
 import HomeLayout from './components/HomeLayout.vue'
 import CollapsibleOutline from './components/CollapsibleOutline.vue'
+import ReadingTime from './components/ReadingTime.vue'
 import { h } from 'vue'
 
 export default {
@@ -16,5 +17,6 @@ export default {
   },
   enhanceApp({ app }) {
     app.component('HomeLayout', HomeLayout)
+    app.component('ReadingTime', ReadingTime)
   }
 } satisfies Theme

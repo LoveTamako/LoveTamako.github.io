@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitepress'
 import { sidebar } from './sidebar'
+import { readingTimeMarkdownPlugin } from './readingTime'
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -7,6 +8,11 @@ export default defineConfig({
   title: "LoveTamako个人博客",
   lastUpdated: true,
   description: "LoveTamako个人博客",
+  markdown: {
+    config(md) {
+      readingTimeMarkdownPlugin(md)
+    }
+  },
   themeConfig: {
     logo: '/images/tamako.svg',
     outline: {
