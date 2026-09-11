@@ -183,7 +183,6 @@
 }
 
 html {
-  scroll-behavior: smooth;
   /* 暂时禁用 scroll snap 以排查问题 */
   /* scroll-snap-type: y proximity; */
 }
