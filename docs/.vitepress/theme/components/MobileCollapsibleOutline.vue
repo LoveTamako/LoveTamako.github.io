@@ -121,6 +121,7 @@ onBeforeUnmount(() => {
                   :id="`mobile-outline-group-${index}`"
                   :items="item.children"
                   :active-link="activeLink"
+                  :id-prefix="`mobile-outline-${index}`"
                 />
               </Transition>
             </li>
@@ -300,6 +301,25 @@ onBeforeUnmount(() => {
   min-height: 36px;
   font-size: 14px;
   line-height: 36px;
+}
+
+:deep(.outline-children .outline-row.has-toggle) {
+  grid-template-columns: minmax(0, 1fr) 32px;
+}
+
+:deep(.outline-children .outline-toggle) {
+  width: 32px;
+  height: 32px;
+}
+
+:deep(.outline-children .outline-children) {
+  padding-left: 10px;
+}
+
+:deep(.outline-children .outline-children .outline-link) {
+  min-height: 32px;
+  font-size: 13px;
+  line-height: 32px;
 }
 
 .chevron {

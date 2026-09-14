@@ -16,7 +16,7 @@ export default defineConfig({
   themeConfig: {
     logo: '/images/tamako.svg',
     outline: {
-      level: [2, 3] // 显示 h2 ~ h4
+      level: [2, 4] // 显示 h2 ~ h4
     },
     search: {
       provider: 'local',

@@ -273,6 +273,7 @@ onBeforeUnmount(() => {
               :id="`outline-group-${index}`"
               :items="item.children"
               :active-link="activeLink"
+              :id-prefix="`desktop-outline-${index}`"
             />
           </Transition>
         </li>
@@ -370,6 +371,10 @@ onBeforeUnmount(() => {
 
 :deep(.outline-children .outline-link::before) {
   left: -31px;
+}
+
+:deep(.outline-children .outline-children .outline-link::before) {
+  left: -43px;
 }
 
 .outline-link.active::before,
