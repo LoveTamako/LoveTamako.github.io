@@ -3079,17 +3079,31 @@ PUBLISH order.created '{"orderId":1001}'
 | `XTRIM` | 裁剪 Stream，避免消息无限增长 |
 
 ```bash
-# 添加消息；* 表示由 Redis 自动生成消息 ID
+# XADD key ID field value [field value ...]
+# stream.orders 是 Stream 名称；* 表示由 Redis 自动生成消息 ID
+# 后面的内容是消息字段和值，此处写入了 id、userId 和 voucherId 三个字段
 XADD stream.orders * id 1001 userId 10 voucherId 1
 
 # 查询全部历史消息
 XRANGE stream.orders - +
 
-# 从最新位置开始阻塞等待新消息
+# XREAD [COUNT count] [BLOCK milliseconds] STREAMS key ID
+# COUNT 1 表示最多读取 1 条；BLOCK 2000 表示最多阻塞等待 2000 毫秒
+# stream.orders 是要读取的 Stream；$ 表示只读取命令执行后新增的消息
 XREAD COUNT 1 BLOCK 2000 STREAMS stream.orders $
 ```
 
-消息 ID 通常采用 `<毫秒时间戳>-<序列号>` 的格式，例如 `1725872400000-0`。在不使用消费者组时，客户端需要自行记录上一次读取到的 ID；如果每次都从 `$` 开始读取，可能漏掉两次读取之间到达的消息。
+消息 ID 通常采用 `<毫秒时间戳>-<序列号>` 的格式，例如 `1725872400000-0`。`XREAD` 会返回 ID 大于指定起始 ID 的消息。
+
+**`XREAD` 命令特点：**
+
+- **消息可回溯**：消息读取后不会被删除，可以根据消息 ID 再次读取历史消息
+- **支持多消费者读取**：多个消费者可以读取同一条消息，实现消息共享
+- **支持阻塞读取**：通过 `BLOCK` 参数等待新消息，避免消费者不断轮询 Redis
+
+:::tip 消息漏读风险
+`XREAD` 不会自动记录消费进度，客户端需要保存最后读取的消息 ID，并在下次读取时将其作为起始 ID。如果每次都使用 `$`，则只会等待命令执行后产生的新消息，可能漏掉两次读取之间到达的消息。
+:::
 
 #### 消费者组
 
