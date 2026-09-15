@@ -3068,7 +3068,11 @@ PUBLISH order.created '{"orderId":1001}'
 
 `Stream` 是 Redis 5.0 引入的日志型数据结构。每条消息都会写入 Stream 并获得一个唯一 ID，消息不会因为某个消费者读取而立即删除，因此既可以读取历史消息，也可以通过消费者组实现消息分发、消费确认和故障恢复。
 
-#### 基本操作
+#### 单消费模式（XREAD）
+
+单消费模式由一个消费者使用 `XREAD` 按消息 ID 顺序读取 Stream，并自行维护消费进度。
+
+##### 基本操作
 
 | 命令 | 作用 |
 |------|------|
@@ -3098,48 +3102,89 @@ XREAD COUNT 1 BLOCK 2000 STREAMS stream.orders $
 **`XREAD` 命令特点：**
 
 - **消息可回溯**：消息读取后不会被删除，可以根据消息 ID 再次读取历史消息
-- **支持多消费者读取**：多个消费者可以读取同一条消息，实现消息共享
+- **不具备竞争消费能力**：多个消费者可能读取到同一条消息，不能实现组内负载均衡，因此单消费模式只配置一个活跃消费者
 - **支持阻塞读取**：通过 `BLOCK` 参数等待新消息，避免消费者不断轮询 Redis
 
 :::tip 消息漏读风险
 `XREAD` 不会自动记录消费进度，客户端需要保存最后读取的消息 ID，并在下次读取时将其作为起始 ID。如果每次都使用 `$`，则只会等待命令执行后产生的新消息，可能漏掉两次读取之间到达的消息。
 :::
 
-#### 消费者组
+#### 消费者组模式（XREADGROUP）
 
-消费者组（Consumer Group）是 Stream 实现可靠消费的核心机制：
+消费者组（Consumer Group）将多个消费者划分到同一个组中，共同监听一个 Stream。组内消息会被分配给不同消费者，每条消息通常只由组内一个消费者处理；不同消费者组则可以分别消费同一条消息。
 
-- 同一个组内的消费者竞争消费，每条新消息只会交给其中一个消费者
-- 不同消费者组可以分别读取同一条消息，实现一条消息被多个业务独立处理
-- 消息交付后、确认前会进入 Pending Entries List（PEL）
-- 消费者处理成功后使用 `XACK` 确认，消息才会从该组的 PEL 中移除
+##### 核心特点
+
+1. **消息分流**：组内消费者竞争消费，Redis 会将新消息分配给其中一个消费者，避免同一组内重复处理，从而提升整体处理能力。
+2. **消费进度**：消费者组维护最后投递的消息 ID；每个消费者还维护自己的 Pending 消息。消费者重启后，应先读取自己的 Pending 消息，再读取新的未投递消息。
+3. **消息确认**：消息投递给消费者后会进入 Pending Entries List（PEL）。业务处理成功后执行 `XACK`，消息才会从当前消费者组的 PEL 中移除。
+4. **故障接管**：消费者宕机后，未确认消息不会消失。其他消费者可以使用 `XCLAIM` 或 `XAUTOCLAIM` 接管超时消息。
+
+##### 常用命令
+
+| 命令 | 作用 |
+|------|------|
+| `XGROUP CREATE` | 创建消费者组 |
+| `XGROUP DESTROY` | 删除消费者组 |
+| `XGROUP CREATECONSUMER` | 为消费者组创建消费者 |
+| `XGROUP DELCONSUMER` | 删除消费者组中的消费者 |
+| `XREADGROUP` | 以消费者组方式读取消息 |
+| `XACK` | 确认一条或多条消息 |
+| `XPENDING` | 查看 PEL 中的未确认消息 |
+| `XAUTOCLAIM` | 接管长时间未处理的 Pending 消息 |
+
+**创建和管理消费者组：**
 
 ```bash
-# 创建消费者组：从 ID 0 开始读取历史消息；MKSTREAM 会在 Stream 不存在时自动创建
-XGROUP CREATE stream.orders g1 0 MKSTREAM
+# 创建消费者组；0-0 表示从第一条历史消息开始，MKSTREAM 表示 Stream 不存在时自动创建
+XGROUP CREATE stream.orders g1 0-0 MKSTREAM
 
-# c1 读取 g1 组中尚未投递的新消息；> 表示只读取新消息
+# 删除消费者组
+XGROUP DESTROY stream.orders g1
+
+# 创建、删除消费者
+XGROUP CREATECONSUMER stream.orders g1 c1
+XGROUP DELCONSUMER stream.orders g1 c1
+```
+
+**从消费者组读取消息：**
+
+```bash
+# GROUP 后依次是组名和消费者名
+# > 表示读取从未投递给任何消费者的新消息
 XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS stream.orders >
 
 # 处理成功后确认消息
 XACK stream.orders g1 1725872400000-0
 
-# 查看组内尚未确认的消息
+# 查看组内所有 Pending 消息
 XPENDING stream.orders g1
 ```
+
+##### `XREADGROUP` 参数说明
+
+| 参数 | 说明 |
+|------|------|
+| `GROUP group consumer` | 指定消费者组和消费者；消费者不存在时通常会自动创建 |
+| `COUNT count` | 本次最多读取的消息数量 |
+| `BLOCK milliseconds` | 没有新消息时最长阻塞时间，单位为毫秒 |
+| `NOACK` | 读取后不加入 PEL，不需要手动 `XACK`；不适合不能丢失的订单消息 |
+| `STREAMS key [key ...]` | 指定要读取的 Stream |
+| `>` | 读取从未投递给任何消费者的新消息 |
+| `0-0` 等普通 ID | 读取分配给当前消费者但尚未确认的 Pending 消息 |
 
 创建消费者组时，起始 ID 的含义如下：
 
 | 起始 ID | 含义 | 适用场景 |
 |---------|------|---------|
-| `0` | 从 Stream 中的第一条消息开始消费 | 不能遗漏已有消息的业务 |
-| `$` | 只消费创建组之后到达的新消息 | 明确不需要历史消息的业务 |
+| `0-0` | 从 Stream 中的第一条消息开始消费 | 不能遗漏已有消息的业务 |
+| `$` | 从创建消费者组之后到达的新消息开始消费 | 明确不需要历史消息的业务 |
 
-:::tip `XACK` 不会删除消息
-`XACK` 只表示某个消费者组已经处理完成，并将消息从该组的 PEL 中移除；原始消息仍保留在 Stream 中。需要结合 `XTRIM`、`MAXLEN` 或定期清理策略控制 Stream 长度。
+:::tip `XACK` 不会删除 Stream 中的原始消息
+`XACK` 只会将消息从当前消费者组的 PEL 中移除，消息仍然保留在 Stream 中。需要结合 `XTRIM`、`MAXLEN` 或定期清理策略控制 Stream 长度。
 :::
 
-#### Pending List 与故障恢复
+##### Pending List 与故障恢复
 
 消费者读取消息后如果发生异常，没有执行 `XACK`，消息就会留在 PEL 中。消费者恢复后可以将读取位置指定为 `0`，重新处理分配给自己的未确认消息：
 
