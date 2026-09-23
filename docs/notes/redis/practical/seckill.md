@@ -1,5 +1,14 @@
 # 优惠券秒杀
 
+## 概览
+
+本文以优惠券秒杀下单为主线，从全局唯一订单 ID、库存超卖和一人一单等基础问题出发，逐步演进到 Redis + Lua 资格校验与 Redis Stream 异步创建订单。重点是理解每一步如何兼顾并发安全、响应速度与消息可靠性。
+
+- **基础下单**：生成全局唯一订单 ID，使用数据库条件更新防止库存超卖。
+- **并发控制**：从本地锁过渡到 Redis 分布式锁与 Redisson，处理集群环境下的一人一单。
+- **性能优化**：通过 Lua 原子校验并扣减 Redis 库存，将数据库写入移交后台线程。
+- **可靠消费**：比较 Redis List、Pub/Sub 和 Stream，利用消费者组、PEL 与 `XACK` 改进异步下单。
+
 ## 全局唯一 ID
 
 ### 业务场景
@@ -346,7 +355,7 @@ POST /voucher-order/seckill
 
 <span id="秒杀下单流程图"></span>
 
-![秒杀下单流程](image.png)
+![秒杀下单流程](practical.assets/seckill-order-flow.png)
 
 **接口基本信息：**
 
@@ -707,7 +716,7 @@ WHERE voucher_id = ? AND stock > 0
 
 <span id="一人一单流程图"></span>
 
-![一人一单优化流程图](image-1.png)
+![一人一单优化流程图](practical.assets/seckill-one-user-one-order-flow.png)
 
 ### 初版实现（有问题）
 
@@ -1234,7 +1243,7 @@ public Result seckillVoucher(Long voucherId) {
 
 在极端情况下，业务执行时间过长可能导致锁超时自动释放，此时其他线程获取到锁，而原线程执行完成后会误删其他线程的锁，引发并发安全问题。
 
-![误删问题示意图](image-2.png)
+![误删问题示意图](practical.assets/seckill-lock-expiry-accidental-unlock.png)
 
 | 时间点 | 线程 1 | 线程 2 | 线程 3 | 锁状态 | 问题说明 |
 |-------|--------|--------|--------|--------|----------|
@@ -1256,7 +1265,7 @@ public Result seckillVoucher(Long voucherId) {
    - 一致：说明是自己的锁，可以释放
    - 不一致：说明锁已超时释放或被其他线程持有，不能释放
 
-![解决方案流程](image-3.png)
+![解决方案流程](practical.assets/seckill-lock-owner-check-flow.png)
 
 
 #### 改进分布式锁实现
@@ -1327,7 +1336,7 @@ public void unlock() {
 
 **问题场景：** 三个步骤分别是三条 Redis 命令，不是原子操作。
 
-![原子性问题示意图](image-7.png)
+![原子性问题示意图](practical.assets/seckill-lock-unlock-non-atomic.png)
 
 | 时间点 | 线程 1 | 线程 2 | 线程 3 | 锁状态 | 问题说明 |
 |-------|--------|--------|--------|--------|----------|
@@ -1619,7 +1628,7 @@ public Result seckillVoucher(Long voucherId) {
 
 Redisson 的可重入锁基于 Redis 的 **Hash 结构**实现，使用 **Lua 脚本**保证原子性。
 
-![redisson可重入加锁解锁流程图](image-5.png)
+![redisson可重入加锁解锁流程图](practical.assets/seckill-redisson-reentrant-lock-flow.png)
 
 #### 数据结构
 
@@ -1731,7 +1740,7 @@ Redisson 提供了多个重载的 `tryLock()` 方法：
 
 #### 整体流程概览
 
-![锁重试和看门狗机制整体流程图](image-4.png)
+![锁重试和看门狗机制整体流程图](practical.assets/seckill-redisson-retry-watchdog-flow.png)
 
 #### 锁重试原理
 
@@ -2680,7 +2689,7 @@ Redisson 分布式锁在 Redis 基础命令之上，主要补强了以下能力�
 | 秒杀资格校验 | 判断库存是否充足、是否重复下单 | Redis + Lua 脚本同步完成 |
 | 订单持久化 | 扣减数据库库存、创建订单 | JVM 阻塞队列异步完成 |
 
-![异步秒杀架构](image-8.png)
+![异步秒杀架构](practical.assets/seckill-async-order-architecture.png)
 
 优化后，请求线程只访问 Redis。资格校验通过后，将订单信息写入 JVM 阻塞队列并立即返回订单 ID，再由独立线程异步完成数据库写入，从而缩短接口响应时间并降低数据库在高并发场景下的压力。
 
@@ -2702,7 +2711,7 @@ Redisson 分布式锁在 Redis 基础命令之上，主要补强了以下能力�
 
 ### 代码实现
 
-![异步秒杀流程](image-9.png)
+![异步秒杀流程](practical.assets/seckill-async-order-flow.png)
 
 根据上述流程，异步秒杀可以分为以下四个实现步骤：
 
@@ -3105,7 +3114,7 @@ XREAD COUNT 1 BLOCK 2000 STREAMS stream.orders $
 - **不具备竞争消费能力**：多个消费者可能读取到同一条消息，不能实现组内负载均衡，因此单消费模式只配置一个活跃消费者
 - **支持阻塞读取**：通过 `BLOCK` 参数等待新消息，避免消费者不断轮询 Redis
 
-:::tip 消息漏读风险
+:::warning 消息漏读风险
 `XREAD` 不会自动记录消费进度，客户端需要保存最后读取的消息 ID，并在下次读取时将其作为起始 ID。如果每次都使用 `$`，则只会等待命令执行后产生的新消息，可能漏掉两次读取之间到达的消息。
 :::
 
@@ -3142,8 +3151,10 @@ XGROUP CREATE stream.orders g1 0-0 MKSTREAM
 # 删除消费者组
 XGROUP DESTROY stream.orders g1
 
-# 创建、删除消费者
+# 给指定的消费者组添加消费者
 XGROUP CREATECONSUMER stream.orders g1 c1
+
+# 删除消费者组中的指定消费者
 XGROUP DELCONSUMER stream.orders g1 c1
 ```
 
@@ -3212,13 +3223,32 @@ XREADGROUP GROUP g1 c1 COUNT 1 STREAMS stream.orders 0
 
 改造后的处理流程如下：
 
-| 阶段 | 执行线程 | 处理内容 |
-|------|---------|---------|
-| 资格校验与入队 | HTTP 请求线程 | Lua 脚本原子完成库存校验、一人一单校验、Redis 库存扣减、用户记录和 `XADD` 入队 |
-| 订单持久化 | Stream 消费线程 | 从消费者组读取订单消息，在事务中扣减数据库库存并创建订单 |
-| 消费确认 | Stream 消费线程 | 数据库事务成功后执行 `XACK`；失败时消息保留在 PEL 中等待重试 |
+```text
+[HTTP 请求线程]
+  秒杀请求
+      |
+      v
+  Lua 脚本（原子执行）
+      |-- 库存校验、一人一单校验失败 -> 返回失败
+      `-- 校验通过 -> 扣减 Redis 库存 -> 记录用户 -> XADD 写入 Stream
+                                                        |
+                                                        v
+[Stream 消费线程]
+  消费者组读取订单消息
+      |
+      v
+  数据库事务：扣减库存 -> 创建订单
+      |-- 成功 -> XACK 确认
+      `-- 失败 -> 消息保留在 PEL -> 等待重试
+```
 
 与 JVM 阻塞队列方案相比，关键变化是把“扣减 Redis 库存”和“提交订单任务”合并到同一个 Lua 脚本中。只要脚本返回成功，订单消息就已经写入 Stream，避免了 Redis 扣减成功但 JVM 入队失败的数据窗口。
+
+:::tip Stream 方案还需要 Redisson 吗？
+这条下单链路不需要 Redisson：Lua 原子完成库存与一人一单校验、扣减库存、记录用户及 `XADD` 入队，入口无需再加锁。Stream 负责传递消息，并不替代分布式锁。这里的“原子”指执行不交错，不代表出错回滚。
+
+消息可能重复消费，数据库仍需以 `stock > 0` 扣库存，并建议用 `(user_id, voucher_id)` 唯一索引防重；事务成功后才 `XACK`。其他跨实例互斥场景仍可使用 Redisson。
+:::
 
 #### 1. 初始化 Stream 和消费者组
 
@@ -3459,9 +3489,9 @@ private void handlePendingList() {
 示例只展示 Pending List 的基本处理方式。生产环境必须记录投递次数并设置最大重试次数，持续失败的“毒消息”应转入死信队列或异常表，否则单条消息可能反复失败并占用消费线程。
 :::
 
-### 可靠性与生产实践
+#### 生产环境注意事项
 
-Redis Stream 提供了比 JVM 队列更完整的可靠消费能力，但仍需补充以下工程措施：
+本节使用 Redis Stream 是为了改进 JVM 队列的消息易丢失问题，并演示消费者组、PEL 和 `XACK` 等机制，**不能将示例方案直接视为 RabbitMQ、RocketMQ、Kafka 等专业消息中间件的等价替代**。对于秒杀订单这类关键业务，仅有消息入队和消费确认还不够，生产环境仍需自行解决以下问题：
 
 | 风险 | 当前机制 | 生产环境建议 |
 |------|---------|-------------|
@@ -3469,8 +3499,11 @@ Redis Stream 提供了比 JVM 队列更完整的可靠消费能力，但仍需�
 | 消息重复投递 | 数据库再次校验一人一单 | 为 `(user_id, voucher_id)` 添加唯一索引，保证消费幂等 |
 | 消费者永久下线 | Pending 消息仍归属于原消费者 | 使用唯一消费者名称，并通过 `XAUTOCLAIM` 转移超时消息 |
 | Stream 无限增长 | 消息默认不会自动删除 | 使用 `MAXLEN` / `XTRIM` 裁剪，并结合业务保留周期归档 |
+| 高峰期消息积压 | 消息存储占用 Redis 内存 | 监控积压量、评估容量并扩展消费能力，避免裁剪未处理消息 |
 | Redis 宕机丢数据 | 消息保存在 Redis | 合理配置 AOF、主从复制和高可用；关键业务优先使用专业消息中间件 |
 | Redis 与数据库不一致 | 数据库层再次校验库存和订单 | 增加定时对账、失败补偿和告警机制 |
+
+这并不意味着 Redis Stream 完全不能用于生产；它适合消息规模、可靠性要求和运维能力均可控的场景。但关键订单链路若要求更完善的消息治理、故障恢复和积压处理，应优先评估专业 MQ。无论选用哪种消息中间件，数据库约束、消费幂等与失败补偿都不能省略。
 
 :::warning Redis Cluster 注意事项
 Lua 脚本访问多个 Key 时，这些 Key 在 Redis Cluster 中必须位于同一个哈希槽。集群部署时需要统一设计 Hash Tag，或调整业务拆分方式；本节示例以单节点 Redis 为前提。
@@ -3487,6 +3520,19 @@ Lua 脚本访问多个 Key 时，这些 Key 在 Redis Cluster 中必须位于同
 | 最终数据安全 | 数据库乐观锁、唯一索引、消费幂等和失败补偿共同兜底 |
 
 通过这次改造，秒杀接口只承担“判断资格并提交订单任务”的职责，数据库写入由 Stream 消费者异步完成。系统吞吐量和任务可靠性都优于 JVM 阻塞队列方案，但 Redis Stream 仍不是绝对可靠的分布式事务方案，核心业务必须保留数据库约束和补偿机制。
+
+## 总结
+
+本文围绕“如何让优惠券秒杀既正确又能承受高并发”逐步演进，每一步都针对上一阶段暴露的问题选择相应技术：
+
+| 阶段 | 暴露的问题 | 选用技术 | 解决效果与下一步 |
+|------|-----------|---------|-----------------|
+| 1. 基础下单 | 分布式订单需要全局唯一 ID | Redis `INCR` + 时间戳生成 ID，数据库事务完成同步下单 | 完成订单标识与落库；并发读取库存仍可能超卖 |
+| 2. 防止超卖 | 多个请求可能同时读到剩余库存 | MySQL 条件更新：`stock = stock - 1 WHERE stock > 0` | 扣减时再次检查库存；同一用户仍可能重复下单 |
+| 3. 一人一单 | 本地锁只能约束单实例，集群中仍有并发竞争 | `synchronized` → Redis `SET NX EX` + Lua 安全解锁 → Redisson `RLock`；建议数据库唯一索引兜底 | 逐步解决单实例与集群互斥；同步访问数据库仍限制吞吐量 |
+| 4. 快速响应 | 同步查询、写入数据库耗时较长 | Redis `String` / `Set` + Lua 原子校验，JVM 阻塞队列异步写库 | 请求快速返回；进程故障可能丢失队列中的订单任务 |
+| 5. 失败恢复 | JVM 内存队列不能可靠保存待处理任务 | Redis Stream + 消费者组；Lua `XADD` 入队，PEL 跟踪未确认消息，事务成功后 `XACK` | 降低任务丢失风险并支持重试；仍需处理积压、重复消费等问题 |
+| 6. 生产保障 | Stream 的确认机制不等于完整的生产级 MQ | 数据库唯一约束、消费幂等、重试、对账与补偿；按需求评估 RabbitMQ、RocketMQ、Kafka | 为关键订单补齐可靠性措施，并明确消息中间件的选型边界 |
 
 **参考资料：**
 
