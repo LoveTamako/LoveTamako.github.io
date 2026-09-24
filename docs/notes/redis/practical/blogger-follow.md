@@ -38,7 +38,7 @@ CREATE TABLE `tb_blog` (
 ) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4;
 ```
 
-**Blog 实体类：**
+**Blog 实体类：** {#blog-entity}
 
 ```java
 @Data
@@ -309,8 +309,268 @@ Blog 表只存储了 `userId`，没有冗余存储用户的昵称和头像。查
 - 对于列表查询场景，可以考虑使用 MyBatis 的联表查询或批量查询优化
 :::
 
-
-
 ## 点赞
+
+点赞功能是 UGC 内容平台的核心互动功能之一。用户可以为喜欢的探店笔记点赞，同一个用户只能点赞一次，再次点击则取消点赞。
+
+**核心需求**：
+
+1. **点赞/取消点赞**：点击点赞按钮，未点赞则点赞，已点赞则取消
+2. **防止重复点赞**：同一用户对同一笔记只能点赞一次
+3. **点赞状态显示**：前端根据 `isLike` 字段高亮显示点赞按钮
+4. **点赞数统计**：实时更新笔记的点赞数量
+
+### 技术方案选型：Redis vs 数据库
+
+点赞功能的核心是记录"哪些用户给哪些笔记点了赞"，常见的实现方案有两种：
+
+**方案一：数据库中间表**
+
+创建一张 `tb_blog_like` 中间表记录点赞关系：
+
+```sql
+CREATE TABLE tb_blog_like (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    blog_id BIGINT NOT NULL,      -- 笔记ID
+    user_id BIGINT NOT NULL,      -- 用户ID
+    create_time DATETIME NOT NULL,
+    UNIQUE KEY uk_blog_user (blog_id, user_id)  -- 联合唯一索引防止重复点赞
+);
+```
+
+**方案二：Redis Set 集合**
+
+使用 Redis Set 存储每篇笔记的点赞用户列表：
+
+```
+Key:   blog:liked:{blogId}
+Type:  Set
+Value: {userId1, userId2, userId3, ...}
+```
+
+**对比分析**
+
+| 维度 | 数据库中间表 | Redis Set |
+|------|------------|-----------|
+| **查询性能** | 需要走索引查询，QPS 约 1000-5000 | 内存操作，QPS 可达 10w+ |
+| **并发写入** | 依赖数据库锁，高并发时容易成为瓶颈 | 单线程模型 + 原子操作，天然支持高并发 |
+| **数据量** | 热门笔记可能产生百万级记录 | 只存储用户 ID，内存占用小 |
+| **防重复** | 依赖联合唯一索引 | Set 自动去重 |
+| **判断是否点赞** | `SELECT COUNT(*) ... WHERE blog_id=? AND user_id=?` | `SISMEMBER` 命令，O(1) 时间复杂度 |
+| **数据持久化** | 天然持久化 | 需要配置持久化策略 |
+
+**为什么选择 Redis？**
+
+1. **性能优势明显**：点赞是高频操作，用户每次查看笔记都需要判断点赞状态，Redis 的内存读取速度远超数据库磁盘 I/O
+2. **减轻数据库压力**：热门笔记可能有数万次点赞，如果每次都查询数据库，会对 MySQL 造成很大压力
+3. **更适合临时状态**：点赞状态属于"用户会话级别"的临时数据，不需要像订单、支付那样强持久化
+
+**数据持久化方案**
+
+虽然使用 Redis，但仍需考虑数据安全：
+
+- **方案一**：开启 Redis AOF 持久化，数据写入即刻同步到磁盘
+- **方案二**：定期将 Redis Set 数据批量同步到数据库备份表（推荐）
+- **方案三**：在点赞/取消点赞时，同时写入数据库中间表（适合对数据一致性要求极高的场景）
+
+::: tip 生产环境建议
+
+对于大多数场景，**Redis + 定期同步数据库** 是最优方案：
+
+- 热点数据用 Redis 提供高性能查询
+- 数据库作为冷备份，Redis 故障时可以快速恢复
+- 定期（如每小时）将 Redis 数据批量写入数据库，兼顾性能和安全
+
+:::
+
+### 数据结构设计
+
+为了支持点赞功能，需要在 [Blog 实体类](#blog-entity) 中添加 `isLike` 字段，用于标识当前用户是否已点赞：
+
+```java
+@TableField(exist = false)
+private Boolean isLike;  // 当前用户是否点赞（非数据库字段）
+```
+
+**Redis 数据结构**
+
+```
+Key:   blog:liked:{blogId}     # 某篇笔记的点赞用户集合
+Type:  Set                      # Set 自动去重，判断是否点赞时间复杂度 O(1)
+Value: {userId1, userId2, ...}  # 存储已点赞的用户 ID
+```
+
+### 点赞/取消点赞
+
+用户点击点赞按钮时，系统需要判断当前点赞状态并执行相应操作：未点赞则添加点赞，已点赞则取消点赞。
+
+**接口说明**
+
+| 项目 | 内容 |
+|------|------|
+| 请求方式 | PUT |
+| 请求路径 | `/blog/like/{id}` |
+| 请求参数 | id（笔记ID，路径参数） |
+| 返回结果 | Result 对象 |
+
+**实现思路**
+
+1. 获取当前登录用户
+2. 判断用户是否已点赞（检查 Redis Set）
+3. 如果未点赞：
+   - 数据库点赞数 +1
+   - 用户 ID 添加到 Redis Set
+4. 如果已点赞：
+   - 数据库点赞数 -1
+   - 用户 ID 从 Redis Set 中移除
+
+**Controller 层**
+
+```java
+@RestController
+@RequestMapping("/blog")
+public class BlogController {
+
+    @Resource
+    private IBlogService blogService;
+
+    /**
+     * 点赞/取消点赞
+     */
+    @PutMapping("/like/{id}")
+    public Result likeBlog(@PathVariable("id") Long id) {
+        return blogService.likeBlog(id);
+    }
+}
+```
+
+**Service 层**
+
+```java
+@Service
+public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IBlogService {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private IUserService userService;
+
+    private static final String BLOG_LIKED_KEY = "blog:liked:";
+
+    @Override
+    public Result likeBlog(Long id) {
+        // 1. 获取当前登录用户
+        Long userId = UserHolder.getUser().getId();
+
+        // 2. 判断当前用户是否已点赞
+        String key = BLOG_LIKED_KEY + id;
+        Boolean isMember = stringRedisTemplate.opsForSet().isMember(key, userId.toString());
+
+        if (BooleanUtil.isFalse(isMember)) {
+            // 3. 如果未点赞，可以点赞
+            // 3.1 数据库点赞数 +1
+            boolean isSuccess = update().setSql("liked = liked + 1").eq("id", id).update();
+            
+            // 3.2 保存用户到 Redis 的 Set 集合
+            if (isSuccess) {
+                stringRedisTemplate.opsForSet().add(key, userId.toString());
+            }
+        } else {
+            // 4. 如果已点赞，取消点赞
+            // 4.1 数据库点赞数 -1
+            boolean isSuccess = update().setSql("liked = liked - 1").eq("id", id).update();
+            
+            // 4.2 把用户从 Redis 的 Set 集合移除
+            if (isSuccess) {
+                stringRedisTemplate.opsForSet().remove(key, userId.toString());
+            }
+        }
+
+        return Result.ok();
+    }
+}
+```
+
+**关键实现点**
+
+1. **数据库更新优化**
+   - 使用 `setSql("liked = liked + 1")` 直接在 SQL 层面更新
+   - 避免"查询 → 修改 → 更新"的并发问题
+   - MyBatis-Plus 的 `update()` 方法返回布尔值，便于判断是否成功
+
+2. **事务一致性**：先更新数据库，成功后再更新 Redis
+
+::: tip 为什么先更新数据库再更新 Redis？
+
+| 更新顺序 | 失败情况 | 后果 | 是否可恢复 |
+|---------|---------|------|-----------|
+| 先 Redis 后数据库 | Redis 成功，数据库失败 | Redis 显示已点赞，数据库未记录 | ❌ 数据不一致 |
+| 先数据库后 Redis（推荐） | 数据库成功，Redis 失败 | 下次查询时从数据库加载正确数据 | ✅ 可自动修复 |
+
+**结论**：即使 Redis 更新失败，下次查询笔记详情时会重新判断点赞状态，可以自动修复不一致。
+
+:::
+
+### 查询笔记时判断点赞状态
+
+在查询笔记详情时，需要判断当前用户是否已点赞，并将结果赋值给 `isLike` 字段，前端根据此字段高亮显示点赞按钮。
+
+**修改查询笔记详情接口**
+
+```java
+@Service
+public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IBlogService {
+
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
+    @Resource
+    private IUserService userService;
+
+    private static final String BLOG_LIKED_KEY = "blog:liked:";
+
+    @Override
+    public Result queryBlogById(Long id) {
+        // 1. 查询笔记
+        Blog blog = getById(id);
+        if (blog == null) {
+            return Result.fail("笔记不存在");
+        }
+        
+        // 2. 查询笔记发布者信息
+        queryBlogUser(blog);
+        
+        // 3. 查询当前用户是否已点赞
+        isBlogLiked(blog);
+        
+        return Result.ok(blog);
+    }
+
+    /**
+     * 查询并设置当前用户是否点赞
+     */
+    private void isBlogLiked(Blog blog) {
+        // 1. 获取当前登录用户
+        UserDTO user = UserHolder.getUser();
+        if (user == null) {
+            // 用户未登录，无需查询点赞状态
+            return;
+        }
+
+        // 2. 判断当前用户是否已点赞
+        Long userId = user.getId();
+        String key = BLOG_LIKED_KEY + blog.getId();
+        Boolean isMember = stringRedisTemplate.opsForSet().isMember(key, userId.toString());
+        blog.setIsLike(BooleanUtil.isTrue(isMember));
+    }
+}
+```
+
+**关键实现点**
+
+1. **布尔值处理**
+   - 使用 `BooleanUtil.isTrue()` 处理 `isMember` 返回值
+   - 避免自动拆箱可能导致的空指针异常
 
 ## 点赞排行榜
