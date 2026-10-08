@@ -21,6 +21,7 @@ export const redisSidebar = [
                     { text: '2. 商户查询缓存', link: '/notes/redis/practical/merchant-cache' },
                     { text: '3. 优惠券秒杀', link: '/notes/redis/practical/seckill' },
                     { text: '4. 达人探店', link: '/notes/redis/practical/blogger-follow' },
+                    { text: '5. 好友关注', link: '/notes/redis/practical/friend-following' },
                 ]
             }
         ]
