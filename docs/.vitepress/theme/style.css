@@ -210,6 +210,11 @@ body {
     radial-gradient(circle at 88% 12%, rgba(255, 255, 255, 0.04), transparent 22%);
 }
 
+/* 右栏背景透明，移除默认主题底部的纯色渐变遮罩，避免形成突兀的色块。 */
+.VPDoc .aside .aside-curtain {
+  display: none;
+}
+
 .VPNavBar {
   background: var(--vp-c-surface-overlay) !important;
   backdrop-filter: blur(18px);
