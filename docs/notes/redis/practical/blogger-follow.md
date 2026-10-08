@@ -9,7 +9,7 @@
 1. **探店笔记发布**：支持上传图片和发布笔记
 2. **探店笔记查询**：查询笔记详情，展示发布者信息
 3. **点赞功能**：点赞/取消点赞，使用 Redis Set 防止重复点赞
-4. **点赞排行榜**：使用 Redis SortedSet 实现点赞用户排行
+4. **点赞人 Top 5**：使用 Redis SortedSet 在笔记详情页展示最早点赞的 5 位用户
 
 ## 探店笔记
 
@@ -575,37 +575,45 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 
 ## 点赞排行榜
 
-在探店笔记列表页面，需要按照点赞时间展示点赞排行榜，让用户看到最新被点赞的笔记内容。
+在探店笔记详情页，需要展示**给当前笔记点赞的用户 Top 5**，包括用户的头像和昵称。这里按点赞时间从早到晚排序，展示当前仍在点赞集合中、最早点赞的 5 位用户；不足 5 位时展示全部点赞用户。
 
 **核心需求**：
 
-1. **实时排序**：按点赞时间实时排序笔记
-2. **高性能查询**：支持高并发的排行榜查询
-3. **Top N 查询**：只查询前 N 条热门笔记
-4. **用户信息关联**：展示笔记时需要关联用户昵称和头像
-
-**技术方案**：使用 Redis SortedSet（有序集合）存储笔记点赞排行，利用 SortedSet 的自动排序特性实现高性能的 Top N 查询。
+1. **按笔记区分**：每篇笔记维护自己的点赞用户集合
+2. **记录点赞时间**：同一用户只能出现一次，并按点赞时间排序
+3. **查询 Top 5**：返回该笔记最早点赞的 5 位用户的昵称和头像
+4. **取消点赞同步移除**：用户取消点赞后，不再出现在点赞人列表中
 
 ### 数据结构设计
+
+|  | Redis List | Redis Set | Redis SortedSet |
+|----------|------------|-----------|-----------------|
+| 排序方式 | 按插入位置形成顺序 | 无序 | 按 score 排序，score 相同时按成员字典序排列 |
+| 唯一性 | 不唯一 | 唯一 | 唯一|
+| 查找方式 | 按索引查找或首尾查找 | 根据元素查找 | 根据元素查找 |
+
+SortedSet 以用户 ID 作为 Member 保证唯一，以点赞时间戳作为 score 排序；通过 `ZSCORE` 判断点赞状态，通过 `ZRANGE` 查询最早点赞的 5 位用户，满足点赞人 Top 5 的需求。
 
 **Redis SortedSet 结构**
 
 ```
-Key:   blog:liked:rank         # 全局点赞排行榜
-Type:  SortedSet               # 自动按 score 排序，支持范围查询
-Member: blogId                 # 笔记 ID
-Score:  timestamp              # 点赞时间戳（用于按时间排序）
+Key:    blog:liked:{blogId}     # 某篇笔记的点赞用户集合
+Type:   SortedSet              # 按 score 排序，支持范围查询
+Member: userId                 # 给该笔记点赞的用户 ID
+Score:  timestamp              # 该用户的点赞时间戳（毫秒）
 ```
 
-**为什么使用时间戳作为 Score？**
+时间戳越小，表示点赞越早，因此使用 `range(key, 0, 4)`（对应 `ZRANGE key 0 4`）按 score 升序查询最早点赞的 5 位用户。`ZSCORE` 返回的 score 非空表示已点赞，为空表示未点赞。
 
-- 需求是展示"最新点赞的笔记"，而不是"点赞数最多的笔记"
-- 使用时间戳可以实现按时间倒序排列
-- 每次点赞时更新该笔记的时间戳，自动调整排序位置
+::: tip 从 Set 升级为 SortedSet
+本节的 SortedSet 实现替换前面的 Set 实现，仍使用 `blog:liked:{blogId}` 作为 key。点赞、取消点赞和点赞状态判断都要统一改用 `opsForZSet()`。
+
+Redis 的同一个 key 不能同时是 Set 和 SortedSet。若已有 Set 类型的点赞数据，需要先迁移为 SortedSet，否则会出现 `WRONGTYPE` 错误。原 Set 未记录点赞时间，迁移时无法还原历史点赞的真实先后顺序。
+:::
 
 ### 修改点赞接口
 
-在用户点赞时，除了更新点赞数和 Set 集合，还需要将笔记 ID 添加到 SortedSet 排行榜中。
+点赞时，将用户 ID 加入当前笔记的 SortedSet，并记录点赞时间；取消点赞时，将该用户 ID 从集合中移除。数据库中的 `liked` 字段仍用于记录笔记的总点赞数。
 
 **修改 Service 层**
 
@@ -616,45 +624,32 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    @Resource
-    private IUserService userService;
-
     private static final String BLOG_LIKED_KEY = "blog:liked:";
-    private static final String BLOG_LIKED_RANK_KEY = "blog:liked:rank";
 
     @Override
     public Result likeBlog(Long id) {
-        // 1. 获取当前登录用户
         Long userId = UserHolder.getUser().getId();
 
-        // 2. 判断当前用户是否已点赞
         String key = BLOG_LIKED_KEY + id;
-        Boolean isMember = stringRedisTemplate.opsForSet().isMember(key, userId.toString());
+        // 修改：改用 ZSet 的 score()，替换 Set 的 isMember()
+        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
 
-        if (BooleanUtil.isFalse(isMember)) {
-            // 3. 如果未点赞，可以点赞
-            // 3.1 数据库点赞数 +1
+        // 修改：score 为 null 表示未点赞
+        if (score == null) {
             boolean isSuccess = update().setSql("liked = liked + 1").eq("id", id).update();
-            
+
             if (isSuccess) {
-                // 3.2 保存用户到 Redis 的 Set 集合
-                stringRedisTemplate.opsForSet().add(key, userId.toString());
-                
-                // 3.3 添加到 SortedSet 排行榜，score 为当前时间戳
+                // 修改：改用 ZSet 的 add()，新增点赞时间戳作为 score
                 stringRedisTemplate.opsForZSet().add(
-                    BLOG_LIKED_RANK_KEY, 
-                    id.toString(), 
-                    System.currentTimeMillis()
+                    key, userId.toString(), System.currentTimeMillis()
                 );
             }
         } else {
-            // 4. 如果已点赞，取消点赞
-            // 4.1 数据库点赞数 -1
             boolean isSuccess = update().setSql("liked = liked - 1").eq("id", id).update();
-            
+
             if (isSuccess) {
-                // 4.2 把用户从 Redis 的 Set 集合移除
-                stringRedisTemplate.opsForSet().remove(key, userId.toString());
+                // 修改：改用 ZSet 的 remove() 取消点赞
+                stringRedisTemplate.opsForZSet().remove(key, userId.toString());
             }
         }
 
@@ -663,31 +658,47 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 }
 ```
 
-**关键改进点**
+**同步修改点赞状态判断**
 
-1. **新增常量**：`BLOG_LIKED_RANK_KEY` 用于存储排行榜
-2. **点赞时添加到排行榜**：使用 `zadd` 命令，score 为当前时间戳
-3. **取消点赞时不移除**：排行榜保留历史热门笔记，体现"曾经被点赞过"的热度
+前面的 `isBlogLiked()` 方法也要从 `SISMEMBER` 改为查询 score：
 
-### 查询点赞排行榜
+```java
+private void isBlogLiked(Blog blog) {
+    UserDTO user = UserHolder.getUser();
+    if (user == null) {
+        // 未登录时无需查询点赞状态
+        // 直接返回，避免后续 user.getId() 引发空指针异常
+        return;
+    }
 
-实现查询 Top N 点赞笔记的接口，返回笔记列表及关联的用户信息。
+    String key = BLOG_LIKED_KEY + blog.getId();
+    // 修改：改用 ZSet 的 score()，替换 Set 的 isMember()
+    Double score = stringRedisTemplate.opsForZSet()
+        .score(key, user.getId().toString());
+    // 修改：根据 score 是否为 null 设置点赞状态
+    blog.setIsLike(score != null);
+}
+```
+
+### 查询点赞人 Top 5
+
+笔记详情页根据当前笔记 ID 调用接口，获取该笔记最早点赞的 5 位用户。
 
 **接口说明**
 
 | 项目 | 内容 |
 |------|------|
 | 请求方式 | GET |
-| 请求路径 | `/blog/likes` |
-| 请求参数 | 无 |
-| 返回结果 | Result 对象（包含笔记列表） |
+| 请求路径 | `/blog/likes/{id}` |
+| 请求参数 | id（当前笔记 ID，路径参数） |
+| 返回结果 | Result 对象（包含最多 5 个 UserDTO，字段为 id、nickName、icon） |
 
 **实现思路**
 
-1. 从 Redis SortedSet 中查询 Top 5 的笔记 ID（按时间戳倒序）
-2. 根据笔记 ID 批量查询笔记详情
-3. 为每篇笔记查询发布者信息（昵称、头像）
-4. 为每篇笔记查询当前用户是否点赞
+1. 从 `blog:liked:{id}` 中按点赞时间升序查询前 5 个用户 ID
+2. 如果没有点赞用户，直接返回空列表
+3. 根据用户 ID 批量查询用户信息，并保持 Redis 返回的顺序
+4. 转换为 `UserDTO`，返回用户 ID、昵称和头像供详情页展示
 
 **Controller 层**
 
@@ -700,13 +711,21 @@ public class BlogController {
     private IBlogService blogService;
 
     /**
-     * 查询点赞排行榜
+     * 查询当前笔记的点赞人 Top 5
      */
-    @GetMapping("/likes")
-    public Result queryBlogLikes() {
-        return blogService.queryBlogLikes();
+    @GetMapping("/likes/{id}")
+    public Result queryBlogLikes(@PathVariable("id") Long id) {
+        return blogService.queryBlogLikes(id);
     }
 }
+```
+
+**Service 接口**
+
+在 `IBlogService` 中声明对应方法：
+
+```java
+Result queryBlogLikes(Long id);
 ```
 
 **Service 层**
@@ -722,36 +741,34 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     private IUserService userService;
 
     private static final String BLOG_LIKED_KEY = "blog:liked:";
-    private static final String BLOG_LIKED_RANK_KEY = "blog:liked:rank";
 
     @Override
-    public Result queryBlogLikes() {
-        // 1. 查询 Top 5 的笔记 ID（按时间戳倒序）
-        Set<String> top5 = stringRedisTemplate.opsForZSet()
-            .reverseRange(BLOG_LIKED_RANK_KEY, 0, 4);
-        
+    public Result queryBlogLikes(Long id) {
+        // 1. 查询当前笔记最早点赞的 5 个用户 ID（按时间戳升序）
+        String key = BLOG_LIKED_KEY + id;
+        Set<String> top5 = stringRedisTemplate.opsForZSet().range(key, 0, 4);
+
         if (top5 == null || top5.isEmpty()) {
             return Result.ok(Collections.emptyList());
         }
 
-        // 2. 解析出笔记 ID
+        // 2. 将 Redis 中的用户 ID 转换为 Long
         List<Long> ids = top5.stream()
             .map(Long::valueOf)
             .collect(Collectors.toList());
 
-        // 3. 根据 ID 查询笔记，使用 WHERE id IN (?, ?, ?)
+        // 3. 批量查询用户，并保持点赞时间顺序
         String idStr = StrUtil.join(",", ids);
-        List<Blog> blogs = query().in("id", ids)
+        List<User> users = userService.query().in("id", ids)
             .last("ORDER BY FIELD(id," + idStr + ")")
             .list();
 
-        // 4. 为每篇笔记填充用户信息和点赞状态
-        blogs.forEach(blog -> {
-            queryBlogUser(blog);
-            isBlogLiked(blog);
-        });
+        // 4. 只返回展示需要的用户信息
+        List<UserDTO> userDTOs = users.stream()
+            .map(user -> BeanUtil.copyProperties(user, UserDTO.class))
+            .collect(Collectors.toList());
 
-        return Result.ok(blogs);
+        return Result.ok(userDTOs);
     }
 }
 ```
@@ -759,42 +776,46 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
 **关键实现点**
 
 1. **ZSet 范围查询**
-   - `reverseRange(key, 0, 4)`：获取排名 0-4 的元素（Top 5），按 score 倒序
-   - 返回的是 Member（笔记 ID），不包含 score
+   - `range(key, 0, 4)`：获取下标 0～4 的成员，共最多 5 位用户，按 score 升序
+   - 返回的是 Member（用户 ID），不包含 score
 
-2. **批量查询优化**
-   - 使用 MyBatis-Plus 的 `in("id", ids)` 批量查询
-   - 使用 `ORDER BY FIELD(id,...)` 保持 Redis 返回的顺序
+2. **批量查询并保持顺序**
+   - 使用 `userService.query().in("id", ids)` 批量查询用户
+   - 使用 `ORDER BY FIELD(id,...)` 保持 Redis 中的点赞时间顺序
 
-3. **空值处理**
-   - 如果 SortedSet 为空，直接返回空列表
+3. **返回展示字段**
+   - 将 `User` 转为 `UserDTO`，只返回用户 ID、昵称和头像
+   - 无点赞用户时返回空列表，前端不展示点赞人头像
 
 ::: warning 为什么需要 ORDER BY FIELD？
 
-**问题**：MySQL 的 `WHERE id IN (5, 3, 1)` 查询结果的顺序是不确定的，通常按主键升序返回（1, 3, 5）。
-
-**解决**：使用 `ORDER BY FIELD(id, 5, 3, 1)` 强制按指定顺序返回，保持 Redis SortedSet 的排序结果。
-
-**示例**
+MySQL 的 `WHERE id IN (5, 3, 1)` 不保证按 ID 在参数中的顺序返回。假设 Redis 返回的点赞用户 ID 依次是 5、3、1，需要保留这个点赞先后顺序：
 
 ```sql
--- 不保序（错误）
-SELECT * FROM tb_blog WHERE id IN (5, 3, 1);
--- 结果可能是：1, 3, 5
+-- 仅使用 IN，结果顺序不确定
+SELECT * FROM tb_user WHERE id IN (5, 3, 1);
 
--- 保序（正确）
-SELECT * FROM tb_blog WHERE id IN (5, 3, 1) ORDER BY FIELD(id, 5, 3, 1);
--- 结果保证是：5, 3, 1
+-- 按 Redis 返回的用户 ID 顺序排列
+SELECT * FROM tb_user WHERE id IN (5, 3, 1) ORDER BY FIELD(id, 5, 3, 1);
+-- 结果顺序：5, 3, 1
 ```
 
 :::
 
-至此，达人探店笔记功能的核心实现已完成：
+## 总结
 
-- ✅ 上传图片（时间戳 + 随机数命名）
-- ✅ 发布笔记（关联商户和用户）
-- ✅ 查询笔记详情（关联用户信息）
-- ✅ 点赞/取消点赞（Redis Set 防重复）
-- ✅ 点赞排行榜（Redis SortedSet 实时排序）
+本章围绕探店笔记，实现了发布、详情查询、点赞/取消点赞以及点赞人 Top 5 展示。MySQL 保存笔记内容和点赞总数，Redis 保存点赞用户及其点赞时间，用户的昵称和头像通过查询用户表补充。
 
-完整的功能实现了从内容发布到互动展示的闭环，为用户提供了良好的探店分享体验。
+| 功能 | 实现要点 |
+|------|----------|
+| 发布笔记 | 先上传图片获取访问路径，再保存笔记内容，并绑定当前登录用户 |
+| 查询详情 | 查询笔记并补充发布者信息；登录用户还需查询点赞状态，设置 `isLike` |
+| 点赞/取消点赞 | 根据用户是否已在集合中，更新 MySQL 的 `liked`，并在 Redis 中添加或移除用户 ID |
+| 点赞人 Top 5 | 从 ZSet 按点赞时间升序取前 5 个用户 ID，批量查询用户信息并保持原顺序 |
+
+**需要掌握的关键点：**
+
+1. **根据需求选择数据结构**：Set 适合去重和判断成员是否存在；需要按点赞时间排序时，改用 SortedSet，以用户 ID 为 Member、毫秒时间戳为 score。
+2. **统一使用 ZSet 操作**：升级后使用 `ZSCORE` 判断点赞状态、`ZADD` 添加点赞、`ZREM` 取消点赞、`ZRANGE key 0 4` 查询 Top 5；已有 Set 数据需要迁移。
+3. **保留查询顺序**：MySQL 的 `IN` 查询不保证结果顺序，需要通过 `ORDER BY FIELD` 或在应用层重排，保持 Redis 返回的点赞先后顺序。
+4. **区分单条命令与完整业务的原子性**：集合成员唯一不代表“判断状态 → 更新计数 → 更新集合”整体原子；先写 MySQL 再写 Redis 也不保证两者一致，仍需处理并发请求和写入失败后的补偿。
