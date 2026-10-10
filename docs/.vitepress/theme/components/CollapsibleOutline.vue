@@ -4,13 +4,41 @@ import { getScrollOffset, useData } from 'vitepress'
 import { useLayout, type DefaultTheme } from 'vitepress/theme'
 import CollapsibleOutlineChildren from './CollapsibleOutlineChildren.vue'
 import MobileCollapsibleOutline from './MobileCollapsibleOutline.vue'
+import OutlineToggle from './OutlineToggle.vue'
 
-const { theme } = useData<DefaultTheme.Config>()
+const { theme, page } = useData<DefaultTheme.Config>()
 const { headers, hasLocalNav } = useLayout()
 
 const activeLink = ref<string | null>(null)
-const expandedGroup = ref<string | null>(null)
+const manualGroupStates = ref(new Map<string, boolean>())
 const mounted = ref(false)
+
+const activeGroups = computed(() =>
+  activeLink.value ? findActiveGroups(headers.value, activeLink.value) ?? [] : []
+)
+
+const expandedGroups = computed(() => {
+  const groups = new Set(activeGroups.value)
+
+  for (const [link, expanded] of manualGroupStates.value) {
+    if (!expanded) continue
+
+    for (const ancestor of findActiveGroups(headers.value, link) ?? []) {
+      groups.add(ancestor)
+    }
+  }
+
+  // Explicit collapses take priority over paths kept open by manual descendants.
+  for (const [link, expanded] of manualGroupStates.value) {
+    if (!expanded) groups.delete(link)
+  }
+
+  return groups
+})
+
+const visibleActiveLink = computed(() =>
+  activeGroups.value.find((link) => !expandedGroups.value.has(link)) ?? activeLink.value
+)
 
 const outlineTitle = computed(() => {
   const outline = theme.value.outline
@@ -25,64 +53,25 @@ const outlineTitle = computed(() => {
 let animationFrame = 0
 let navigationTarget: string | null = null
 let navigationEndTimer: ReturnType<typeof setTimeout> | undefined
-let pendingExpandedGroup: string | null = null
-let groupIsCollapsing = false
-let groupTransitionFrame = 0
 
-function containsLink(item: DefaultTheme.OutlineItem, link: string): boolean {
-  return item.link === link || Boolean(item.children?.some((child) => containsLink(child, link)))
-}
+function findActiveGroups(
+  items: DefaultTheme.OutlineItem[],
+  link: string
+): string[] | null {
+  for (const item of items) {
+    if (item.link === link) return item.children?.length ? [item.link] : []
 
-function findActiveGroup(link: string) {
-  return headers.value.find((item) => containsLink(item, link))
-}
-
-function requestExpandedGroup(link: string | null) {
-  if (groupIsCollapsing) {
-    pendingExpandedGroup = link
-    return
+    const childGroups = item.children && findActiveGroups(item.children, link)
+    if (childGroups) return [item.link, ...childGroups]
   }
 
-  if (expandedGroup.value && expandedGroup.value !== link) {
-    pendingExpandedGroup = link
-    groupIsCollapsing = true
-    expandedGroup.value = null
-    return
-  }
-
-  expandedGroup.value = link
-}
-
-function finishGroupCollapse() {
-  if (!groupIsCollapsing) return
-
-  groupIsCollapsing = false
-  const nextGroup = pendingExpandedGroup
-  pendingExpandedGroup = null
-
-  if (!nextGroup) return
-
-  groupTransitionFrame = requestAnimationFrame(() => {
-    groupTransitionFrame = 0
-    requestExpandedGroup(nextGroup)
-  })
-}
-
-function expandGroupForLink(link: string | null) {
-  if (!link) {
-    requestExpandedGroup(null)
-    return
-  }
-
-  const group = findActiveGroup(link)
-  requestExpandedGroup(group?.children?.length ? group.link : null)
+  return null
 }
 
 function setActiveLink(link: string | null) {
   if (activeLink.value === link) return
 
   activeLink.value = link
-  expandGroupForLink(link)
 }
 
 function finishNavigation() {
@@ -118,7 +107,6 @@ function handleOutlineClick(event: MouseEvent) {
   animationFrame = 0
   navigationTarget = link
   activeLink.value = link
-  expandGroupForLink(link)
 
   // Fallback for browsers that do not emit `scrollend`.
   scheduleNavigationEnd(500)
@@ -129,7 +117,6 @@ function returnToTop() {
   animationFrame = 0
   navigationTarget = '#'
   activeLink.value = null
-  requestExpandedGroup(null)
   scheduleNavigationEnd(500)
 
   const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -190,19 +177,18 @@ function queueActiveLinkUpdate() {
 }
 
 function toggleGroup(link: string) {
-  requestExpandedGroup(expandedGroup.value === link ? null : link)
+  manualGroupStates.value.set(link, !expandedGroups.value.has(link))
 }
+
+watch(() => page.value.relativePath, () => {
+  manualGroupStates.value.clear()
+})
 
 watch(headers, () => {
   navigationTarget = null
   if (navigationEndTimer) clearTimeout(navigationEndTimer)
   navigationEndTimer = undefined
-  pendingExpandedGroup = null
-  groupIsCollapsing = false
-  if (groupTransitionFrame) cancelAnimationFrame(groupTransitionFrame)
-  groupTransitionFrame = 0
   activeLink.value = null
-  expandedGroup.value = null
   queueActiveLinkUpdate()
 })
 
@@ -220,7 +206,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('scrollend', finishNavigation)
   window.removeEventListener('resize', queueActiveLinkUpdate)
   if (navigationEndTimer) clearTimeout(navigationEndTimer)
-  if (groupTransitionFrame) cancelAnimationFrame(groupTransitionFrame)
   if (animationFrame) cancelAnimationFrame(animationFrame)
 })
 </script>
@@ -247,33 +232,32 @@ onBeforeUnmount(() => {
           <div class="outline-row">
             <a
               class="outline-link"
-              :class="{ active: activeLink === item.link }"
+              :class="{ active: visibleActiveLink === item.link }"
+              :aria-current="visibleActiveLink === item.link ? 'location' : undefined"
               :href="item.link"
               :title="item.title"
             >
               <span class="outline-link-text">{{ item.title }}</span>
             </a>
 
-            <button
+            <OutlineToggle
               v-if="item.children?.length"
-              class="outline-toggle"
-              type="button"
-              :aria-expanded="expandedGroup === item.link"
-              :aria-controls="`outline-group-${index}`"
-              :aria-label="`${expandedGroup === item.link ? '收起' : '展开'}“${item.title}”下的目录`"
-              @click="toggleGroup(item.link)"
-            >
-              <span class="chevron" aria-hidden="true" />
-            </button>
+              :expanded="expandedGroups.has(item.link)"
+              :controls="`outline-group-${index}`"
+              :title="item.title"
+              @toggle="toggleGroup(item.link)"
+            />
           </div>
 
-          <Transition name="outline-children" @after-leave="finishGroupCollapse">
+          <Transition name="outline-children">
             <CollapsibleOutlineChildren
-              v-if="item.children?.length && expandedGroup === item.link"
+              v-if="item.children?.length && expandedGroups.has(item.link)"
               :id="`outline-group-${index}`"
               :items="item.children"
-              :active-link="activeLink"
+              :active-link="visibleActiveLink"
+              :expanded-groups="expandedGroups"
               :id-prefix="`desktop-outline-${index}`"
+              @toggle-group="toggleGroup"
             />
           </Transition>
         </li>
@@ -285,8 +269,8 @@ onBeforeUnmount(() => {
     <MobileCollapsibleOutline
       :items="headers"
       :title="outlineTitle"
-      :active-link="activeLink"
-      :expanded-group="expandedGroup"
+      :active-link="visibleActiveLink"
+      :expanded-groups="expandedGroups"
       @navigate="handleOutlineClick"
       @return-top="returnToTop"
       @toggle-group="toggleGroup"
@@ -295,6 +279,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.CollapsibleOutline {
+  --outline-toggle-size: 28px;
+  --outline-row-height: 32px;
+}
+
 :global(.VPDocAside > .VPDocAsideOutline) {
   display: none !important;
 }
@@ -326,17 +315,20 @@ onBeforeUnmount(() => {
 
 .outline-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 28px;
+  grid-template-columns: minmax(0, 1fr) var(--outline-toggle-size);
+  column-gap: 4px;
   align-items: center;
+  min-height: var(--outline-row-height);
 }
 
 .outline-link {
   position: relative;
   display: block;
+  min-width: 0;
   color: var(--vp-c-text-2);
   font-size: 14px;
   font-weight: 400;
-  line-height: 32px;
+  line-height: var(--outline-row-height);
   white-space: nowrap;
   transition: color 0.25s;
 }
@@ -385,44 +377,6 @@ onBeforeUnmount(() => {
 .outline-link:hover,
 .outline-link.active {
   color: var(--vp-c-text-1);
-}
-
-.outline-toggle {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  margin: 0;
-  padding: 0;
-  cursor: pointer;
-  border: 0;
-  border-radius: 6px;
-  color: var(--vp-c-text-3);
-  background: transparent;
-  place-items: center;
-  transition: color 0.2s, background-color 0.2s;
-}
-
-.outline-toggle:hover {
-  color: var(--vp-c-text-1);
-  background: var(--vp-c-bg-soft);
-}
-
-.outline-toggle:focus-visible {
-  outline: 2px solid var(--vp-c-brand-1);
-  outline-offset: 1px;
-}
-
-.chevron {
-  width: 7px;
-  height: 7px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: translateY(-2px) rotate(45deg);
-  transition: transform 0.2s;
-}
-
-.outline-toggle[aria-expanded="true"] .chevron {
-  transform: translateY(2px) rotate(225deg);
 }
 
 .outline-children-enter-active {

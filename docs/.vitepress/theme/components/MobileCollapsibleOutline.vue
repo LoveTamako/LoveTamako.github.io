@@ -3,12 +3,13 @@ import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useData } from 'vitepress'
 import type { DefaultTheme } from 'vitepress/theme'
 import CollapsibleOutlineChildren from './CollapsibleOutlineChildren.vue'
+import OutlineToggle from './OutlineToggle.vue'
 
 const props = defineProps<{
   items: DefaultTheme.OutlineItem[]
   title: string
   activeLink: string | null
-  expandedGroup: string | null
+  expandedGroups: Set<string>
 }>()
 
 const emit = defineEmits<{
@@ -96,32 +97,31 @@ onBeforeUnmount(() => {
                 <a
                   class="outline-link"
                   :class="{ active: activeLink === item.link }"
+                  :aria-current="activeLink === item.link ? 'location' : undefined"
                   :href="item.link"
                   :title="item.title"
                 >
                   {{ item.title }}
                 </a>
 
-                <button
+                <OutlineToggle
                   v-if="item.children?.length"
-                  class="outline-toggle"
-                  type="button"
-                  :aria-expanded="expandedGroup === item.link"
-                  :aria-controls="`mobile-outline-group-${index}`"
-                  :aria-label="`${expandedGroup === item.link ? '收起' : '展开'}“${item.title}”下的目录`"
-                  @click.stop="emit('toggleGroup', item.link)"
-                >
-                  <span class="chevron" aria-hidden="true" />
-                </button>
+                  :expanded="expandedGroups.has(item.link)"
+                  :controls="`mobile-outline-group-${index}`"
+                  :title="item.title"
+                  @toggle="emit('toggleGroup', item.link)"
+                />
               </div>
 
               <Transition name="outline-children">
                 <CollapsibleOutlineChildren
-                  v-if="item.children?.length && expandedGroup === item.link"
+                  v-if="item.children?.length && expandedGroups.has(item.link)"
                   :id="`mobile-outline-group-${index}`"
                   :items="item.children"
                   :active-link="activeLink"
+                  :expanded-groups="expandedGroups"
                   :id-prefix="`mobile-outline-${index}`"
+                  @toggle-group="emit('toggleGroup', $event)"
                 />
               </Transition>
             </li>
@@ -134,6 +134,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .MobileCollapsibleOutline {
+  --outline-toggle-size: 44px;
+  --outline-row-height: 44px;
   display: none;
 }
 
@@ -174,14 +176,12 @@ onBeforeUnmount(() => {
 }
 
 .outline-trigger:focus-visible,
-.outline-toggle:focus-visible,
 .top-link:focus-visible {
   outline: 2px solid var(--vp-c-brand-1);
   outline-offset: -2px;
 }
 
-.trigger-chevron,
-.chevron {
+.trigger-chevron {
   width: 7px;
   height: 7px;
   border-right: 1.5px solid currentColor;
@@ -252,17 +252,20 @@ onBeforeUnmount(() => {
 
 .outline-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 36px;
+  grid-template-columns: minmax(0, 1fr) var(--outline-toggle-size);
+  column-gap: 4px;
   align-items: center;
+  min-height: var(--outline-row-height);
 }
 
 .outline-link {
   display: block;
+  min-width: 0;
   overflow: hidden;
-  min-height: 40px;
+  min-height: var(--outline-row-height);
   color: var(--vp-c-text-2);
   font-size: 14px;
-  line-height: 40px;
+  line-height: var(--outline-row-height);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -276,40 +279,8 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.outline-toggle {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  color: var(--vp-c-text-3);
-  background: transparent;
-  place-items: center;
-}
-
-.outline-toggle:hover {
-  color: var(--vp-c-text-1);
-  background: var(--vp-c-bg-elv);
-}
-
-:deep(.outline-children) {
-  padding-right: 0;
-}
-
 :deep(.outline-children .outline-link) {
-  min-height: 36px;
   font-size: 14px;
-  line-height: 36px;
-}
-
-:deep(.outline-children .outline-row.has-toggle) {
-  grid-template-columns: minmax(0, 1fr) 32px;
-}
-
-:deep(.outline-children .outline-toggle) {
-  width: 32px;
-  height: 32px;
 }
 
 :deep(.outline-children .outline-children) {
@@ -317,17 +288,7 @@ onBeforeUnmount(() => {
 }
 
 :deep(.outline-children .outline-children .outline-link) {
-  min-height: 32px;
   font-size: 13px;
-  line-height: 32px;
-}
-
-.chevron {
-  transform: translateY(-2px) rotate(45deg);
-}
-
-.outline-toggle[aria-expanded="true"] .chevron {
-  transform: translateY(2px) rotate(225deg);
 }
 
 .mobile-outline-enter-active,
@@ -359,7 +320,6 @@ onBeforeUnmount(() => {
 
 @media (prefers-reduced-motion: reduce) {
   .trigger-chevron,
-  .chevron,
   .mobile-outline-enter-active,
   .mobile-outline-leave-active,
   .outline-children-enter-active,

@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
 import type { DefaultTheme } from 'vitepress/theme'
+import OutlineToggle from './OutlineToggle.vue'
 
 defineOptions({ name: 'CollapsibleOutlineChildren' })
 
 const props = withDefaults(defineProps<{
   items: DefaultTheme.OutlineItem[]
   activeLink: string | null
+  expandedGroups: Set<string>
   depth?: number
   idPrefix?: string
 }>(), {
@@ -14,129 +15,48 @@ const props = withDefaults(defineProps<{
   idPrefix: 'outline'
 })
 
-const expandedGroup = ref<string | null>(null)
-
-let pendingExpandedGroup: string | null = null
-let groupIsCollapsing = false
-let groupTransitionFrame = 0
-
-function containsLink(item: DefaultTheme.OutlineItem, link: string): boolean {
-  return item.link === link || Boolean(
-    item.children?.some((child) => containsLink(child, link))
-  )
-}
-
-function findActiveGroup(link: string) {
-  return props.items.find(
-    (item) => item.children?.length && containsLink(item, link)
-  )
-}
-
-function requestExpandedGroup(link: string | null) {
-  if (groupIsCollapsing) {
-    pendingExpandedGroup = link
-    return
-  }
-
-  if (expandedGroup.value && expandedGroup.value !== link) {
-    pendingExpandedGroup = link
-    groupIsCollapsing = true
-    expandedGroup.value = null
-    return
-  }
-
-  expandedGroup.value = link
-}
-
-function finishGroupCollapse() {
-  if (!groupIsCollapsing) return
-
-  groupIsCollapsing = false
-  const nextGroup = pendingExpandedGroup
-  pendingExpandedGroup = null
-
-  if (!nextGroup) return
-
-  groupTransitionFrame = requestAnimationFrame(() => {
-    groupTransitionFrame = 0
-    requestExpandedGroup(nextGroup)
-  })
-}
-
-function syncExpandedGroup(link: string | null) {
-  if (!link) {
-    requestExpandedGroup(null)
-    return
-  }
-
-  requestExpandedGroup(findActiveGroup(link)?.link ?? null)
-}
-
-function toggleGroup(link: string) {
-  requestExpandedGroup(expandedGroup.value === link ? null : link)
-}
+const emit = defineEmits<{
+  toggleGroup: [link: string]
+}>()
 
 function groupId(index: number) {
   return `${props.idPrefix}-${props.depth}-${index}`
 }
-
-watch(
-  () => props.activeLink,
-  (link) => syncExpandedGroup(link),
-  { immediate: true }
-)
-
-watch(
-  () => props.items,
-  () => {
-    pendingExpandedGroup = null
-    groupIsCollapsing = false
-    if (groupTransitionFrame) cancelAnimationFrame(groupTransitionFrame)
-    groupTransitionFrame = 0
-    expandedGroup.value = null
-    syncExpandedGroup(props.activeLink)
-  }
-)
-
-onBeforeUnmount(() => {
-  if (groupTransitionFrame) cancelAnimationFrame(groupTransitionFrame)
-})
 </script>
 
 <template>
   <ul class="outline-children" :data-depth="depth">
     <li v-for="(item, index) in items" :key="item.link">
-      <div class="outline-row" :class="{ 'has-toggle': item.children?.length }">
+      <div class="outline-row">
         <a
           class="outline-link"
           :class="{ active: activeLink === item.link }"
+          :aria-current="activeLink === item.link ? 'location' : undefined"
           :href="item.link"
           :title="item.title"
         >
           <span class="outline-link-text">{{ item.title }}</span>
         </a>
 
-        <button
+        <OutlineToggle
           v-if="item.children?.length"
-          class="outline-toggle"
-          type="button"
-          :aria-expanded="expandedGroup === item.link"
-          :aria-controls="groupId(index)"
-          :aria-label="`${expandedGroup === item.link ? '收起' : '展开'}“${item.title}”下的目录`"
-          @click.stop="toggleGroup(item.link)"
-        >
-          <span class="chevron" aria-hidden="true" />
-        </button>
+          :expanded="expandedGroups.has(item.link)"
+          :controls="groupId(index)"
+          :title="item.title"
+          @toggle="emit('toggleGroup', item.link)"
+        />
       </div>
 
-      <Transition name="outline-nested" @after-leave="finishGroupCollapse">
+      <Transition name="outline-nested">
         <CollapsibleOutlineChildren
-          v-if="item.children?.length && expandedGroup === item.link"
+          v-if="item.children?.length && expandedGroups.has(item.link)"
           :id="groupId(index)"
           :items="item.children"
           :active-link="activeLink"
+          :expanded-groups="expandedGroups"
           :depth="depth + 1"
           :id-prefix="`${idPrefix}-${index}`"
+          @toggle-group="emit('toggleGroup', $event)"
         />
       </Transition>
     </li>
@@ -146,7 +66,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .outline-children {
   margin: 0;
-  padding: 0 8px 4px 14px;
+  padding: 0 0 4px 14px;
   list-style: none;
 }
 
@@ -154,19 +74,22 @@ onBeforeUnmount(() => {
   padding-left: 12px;
 }
 
-.outline-row.has-toggle {
+.outline-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: minmax(0, 1fr) var(--outline-toggle-size, 28px);
+  column-gap: 4px;
   align-items: center;
+  min-height: var(--outline-row-height, 32px);
 }
 
 .outline-link {
   position: relative;
   display: block;
+  min-width: 0;
   color: var(--vp-c-text-2);
   font-size: 13px;
   font-weight: 400;
-  line-height: 28px;
+  line-height: var(--outline-row-height, 32px);
   white-space: nowrap;
   transition: color 0.25s;
 }
@@ -181,44 +104,6 @@ onBeforeUnmount(() => {
 .outline-link:hover,
 .outline-link.active {
   color: var(--vp-c-text-1);
-}
-
-.outline-toggle {
-  display: grid;
-  width: 24px;
-  height: 24px;
-  margin: 0;
-  padding: 0;
-  cursor: pointer;
-  border: 0;
-  border-radius: 5px;
-  color: var(--vp-c-text-3);
-  background: transparent;
-  place-items: center;
-  transition: color 0.2s, background-color 0.2s;
-}
-
-.outline-toggle:hover {
-  color: var(--vp-c-text-1);
-  background: var(--vp-c-bg-soft);
-}
-
-.outline-toggle:focus-visible {
-  outline: 2px solid var(--vp-c-brand-1);
-  outline-offset: 1px;
-}
-
-.chevron {
-  width: 6px;
-  height: 6px;
-  border-right: 1.5px solid currentColor;
-  border-bottom: 1.5px solid currentColor;
-  transform: translateY(-2px) rotate(45deg);
-  transition: transform 0.2s;
-}
-
-.outline-toggle[aria-expanded="true"] .chevron {
-  transform: translateY(2px) rotate(225deg);
 }
 
 .outline-nested-enter-active {
@@ -238,7 +123,6 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chevron,
   .outline-nested-enter-active,
   .outline-nested-leave-active {
     transition: none;
