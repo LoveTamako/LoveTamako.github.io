@@ -185,26 +185,6 @@
 html {
   /* 暂时禁用 scroll snap 以排查问题 */
   /* scroll-snap-type: y proximity; */
-
-  /* 优化锚点跳转偏移：确保标题跳转后紧贴导航栏下方 */
-  scroll-padding-top: 80px !important;
-}
-
-/* 减少标题的上边距，避免跳转时标题上方出现过多内容 */
-.vp-doc h2,
-.vp-doc h3,
-.vp-doc h4,
-.VPDoc h2,
-.VPDoc h3,
-.VPDoc h4 {
-  scroll-margin-top: 80px !important;
-}
-
-/* 额外确保：针对所有带 id 的标题元素 */
-h2[id],
-h3[id],
-h4[id] {
-  scroll-margin-top: 80px !important;
 }
 
 body {

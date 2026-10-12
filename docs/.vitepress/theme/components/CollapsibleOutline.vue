@@ -127,26 +127,10 @@ function handleOutlineClick(event: MouseEvent) {
 
   if (!link) return
 
-  // 阻止默认的锚点跳转行为
-  event.preventDefault()
-
   if (animationFrame) cancelAnimationFrame(animationFrame)
   animationFrame = 0
   navigationTarget = link
   activeLink.value = link
-
-  // 手动滚动到目标位置，使用自定义偏移
-  const targetElement = document.querySelector(link)
-  if (targetElement) {
-    const navHeight = 64  // 导航栏高度
-    const offset = 16     // 额外留白
-    const targetPosition = targetElement.getBoundingClientRect().top + window.scrollY - navHeight - offset
-
-    window.scrollTo({
-      top: targetPosition,
-      behavior: 'smooth'
-    })
-  }
 
   // Fallback for browsers that do not emit `scrollend`.
   scheduleNavigationEnd(500)
