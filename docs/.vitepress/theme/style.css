@@ -185,6 +185,26 @@
 html {
   /* 暂时禁用 scroll snap 以排查问题 */
   /* scroll-snap-type: y proximity; */
+
+  /* 优化锚点跳转偏移：确保标题跳转后紧贴导航栏下方 */
+  scroll-padding-top: 80px !important;
+}
+
+/* 减少标题的上边距，避免跳转时标题上方出现过多内容 */
+.vp-doc h2,
+.vp-doc h3,
+.vp-doc h4,
+.VPDoc h2,
+.VPDoc h3,
+.VPDoc h4 {
+  scroll-margin-top: 80px !important;
+}
+
+/* 额外确保：针对所有带 id 的标题元素 */
+h2[id],
+h3[id],
+h4[id] {
+  scroll-margin-top: 80px !important;
 }
 
 body {
@@ -214,6 +234,52 @@ body {
 .VPDoc .aside .aside-curtain {
   display: none;
 }
+
+/* Reuse the aside scrollport so the outline has no nested scrollbar. */
+.VPDoc .aside-container:has(.CollapsibleOutline) {
+  --outline-top-offset: calc(var(--vp-nav-height) + var(--vp-layout-top-height, 0px) + var(--vp-doc-top-height, 0px) + 48px);
+  top: var(--outline-top-offset);
+  height: calc(100vh - var(--outline-top-offset) - 16px);
+  height: calc(100dvh - var(--outline-top-offset) - 16px);
+  padding-top: 0;
+  scroll-padding-top: 32px;
+}
+
+.VPDoc .aside-container:has(.CollapsibleOutline) .aside-content {
+  min-height: 0;
+  padding-bottom: 8px;
+}
+
+/* 桌面端右侧目录滚动条样式 */
+.VPDoc .aside-container:has(.CollapsibleOutline) {
+  --outline-scrollbar-thumb: var(--vp-c-divider);
+  scrollbar-width: thin;
+  scrollbar-color: var(--outline-scrollbar-thumb) transparent;
+  scrollbar-gutter: stable;
+  overscroll-behavior-y: contain;
+}
+
+.VPDoc .aside-container:has(.CollapsibleOutline):hover,
+.VPDoc .aside-container:has(.CollapsibleOutline):focus-within {
+  --outline-scrollbar-thumb: var(--vp-c-text-3);
+}
+
+.VPDoc .aside-container:has(.CollapsibleOutline)::-webkit-scrollbar {
+  display: block;
+  width: 6px;
+}
+
+.VPDoc .aside-container:has(.CollapsibleOutline)::-webkit-scrollbar-thumb {
+  border-radius: 3px;
+  background-color: var(--outline-scrollbar-thumb);
+}
+
+.VPDoc .aside-container:has(.CollapsibleOutline)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 移动端目录：使用原生滚动行为，不显示自定义滚动条 */
+/* 滚动条隐藏在 MobileCollapsibleOutline.vue 组件内实现 */
 
 .VPNavBar {
   background: var(--vp-c-surface-overlay) !important;

@@ -18,7 +18,7 @@ const emit = defineEmits<{
   toggleGroup: [link: string]
 }>()
 
-const { theme } = useData<DefaultTheme.Config>()
+const { theme, page } = useData<DefaultTheme.Config>()
 const root = ref<HTMLElement>()
 const open = ref(false)
 
@@ -57,6 +57,10 @@ watch(() => props.items, () => {
   open.value = false
 })
 
+watch(() => page.value.relativePath, () => {
+  open.value = false
+})
+
 onMounted(() => {
   document.addEventListener('click', handleOutsideClick)
   document.addEventListener('keydown', handleKeydown)
@@ -83,7 +87,12 @@ onBeforeUnmount(() => {
     </button>
 
     <Transition name="mobile-outline">
-      <div v-if="open" id="mobile-collapsible-outline" class="items">
+      <div
+        v-show="open"
+        :key="page.relativePath"
+        id="mobile-collapsible-outline"
+        class="items"
+      >
         <div class="header">
           <button class="top-link" type="button" @click="returnToTop">
             {{ theme.returnToTopLabel || 'Return to top' }}
@@ -207,11 +216,23 @@ onBeforeUnmount(() => {
   overflow: hidden auto;
   max-height: calc(100vh - var(--vp-nav-height) - 54px);
   max-height: calc(100dvh - var(--vp-nav-height) - 54px);
+  scroll-padding-top: 48px;
   border: 1px solid var(--vp-c-border);
   border-radius: 8px;
   background-color: var(--vp-c-gutter);
   box-shadow: var(--vp-shadow-3);
   overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 隐藏移动端滚动条 */
+.items {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+
+.items::-webkit-scrollbar {
+  display: none; /* Chrome/Safari/Opera */
 }
 
 @media (min-width: 960px) {
@@ -227,6 +248,14 @@ onBeforeUnmount(() => {
   background-color: var(--vp-c-bg-soft);
 }
 
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  border-bottom: 1px solid var(--vp-c-gutter);
+  background-color: var(--vp-c-bg);
+}
+
 .top-link {
   width: 100%;
   padding: 0 16px;
@@ -240,7 +269,6 @@ onBeforeUnmount(() => {
 }
 
 .outline {
-  border-top: 1px solid var(--vp-c-gutter);
   padding: 8px 0;
 }
 
@@ -263,11 +291,19 @@ onBeforeUnmount(() => {
   min-width: 0;
   overflow: hidden;
   min-height: var(--outline-row-height);
+  margin-left: -8px;
+  padding: 0 4px 0 8px;
+  border-radius: 6px;
   color: var(--vp-c-text-2);
   font-size: 14px;
   line-height: var(--outline-row-height);
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition: color 0.2s, background-color 0.2s;
+}
+
+.outline-link:hover {
+  background: var(--vp-c-bg-soft);
 }
 
 .outline-link:hover,
@@ -276,11 +312,18 @@ onBeforeUnmount(() => {
 }
 
 .outline-link.active {
-  font-weight: 600;
+  color: var(--vp-c-text-1);       /* 最深的文字色 */
+  font-weight: 700;                /* 移动端更粗（触摸屏需要更强对比）*/
 }
 
 :deep(.outline-children .outline-link) {
   font-size: 14px;
+  opacity: 0.92;
+}
+
+:deep(.outline-children .outline-link:hover),
+:deep(.outline-children .outline-link.active) {
+  opacity: 1;
 }
 
 :deep(.outline-children .outline-children) {
@@ -289,6 +332,7 @@ onBeforeUnmount(() => {
 
 :deep(.outline-children .outline-children .outline-link) {
   font-size: 13px;
+  opacity: 0.85;
 }
 
 .mobile-outline-enter-active,

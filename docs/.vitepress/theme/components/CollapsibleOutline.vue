@@ -9,6 +9,7 @@ import OutlineToggle from './OutlineToggle.vue'
 const { theme, page } = useData<DefaultTheme.Config>()
 const { headers, hasLocalNav } = useLayout()
 
+const root = ref<HTMLElement>()
 const activeLink = ref<string | null>(null)
 const manualGroupStates = ref(new Map<string, boolean>())
 const mounted = ref(false)
@@ -18,17 +19,36 @@ const activeGroups = computed(() =>
 )
 
 const expandedGroups = computed(() => {
-  const groups = new Set(activeGroups.value)
+  const groups = new Set<string>()
 
+  // 1. 首先添加被手动展开的组及其祖先
   for (const [link, expanded] of manualGroupStates.value) {
-    if (!expanded) continue
-
-    for (const ancestor of findActiveGroups(headers.value, link) ?? []) {
-      groups.add(ancestor)
+    if (expanded) {
+      groups.add(link)
+      // 同时展开其所有祖先，确保该组可见
+      for (const ancestor of findActiveGroups(headers.value, link) ?? []) {
+        groups.add(ancestor)
+      }
     }
   }
 
-  // Explicit collapses take priority over paths kept open by manual descendants.
+  // 2. 自动展开当前激活项的父级路径
+  //    但只对"没有手动状态"的项生效
+  if (activeLink.value) {
+    const activeAncestors = findActiveGroups(headers.value, activeLink.value) ?? []
+    // 只展开父级路径，不展开激活项自己的子级
+    const pathToActive = activeAncestors.slice(0, -1)
+
+    for (const link of pathToActive) {
+      // 关键修改：只有当用户没有手动设置过该项的状态时，才自动展开
+      if (!manualGroupStates.value.has(link)) {
+        groups.add(link)
+      }
+    }
+  }
+
+  // 3. 应用手动折叠（最高优先级）
+  //    用户明确折叠的项，即使激活项在其中，也要折叠
   for (const [link, expanded] of manualGroupStates.value) {
     if (!expanded) groups.delete(link)
   }
@@ -36,9 +56,11 @@ const expandedGroups = computed(() => {
   return groups
 })
 
-const visibleActiveLink = computed(() =>
-  activeGroups.value.find((link) => !expandedGroups.value.has(link)) ?? activeLink.value
-)
+const visibleActiveLink = computed(() => {
+  // 直接返回当前激活的链接，因为我们已经在 expandedGroups 中
+  // 确保其父级路径是展开的，所以激活项一定可见
+  return activeLink.value
+})
 
 const outlineTitle = computed(() => {
   const outline = theme.value.outline
@@ -59,8 +81,10 @@ function findActiveGroups(
   link: string
 ): string[] | null {
   for (const item of items) {
-    if (item.link === link) return item.children?.length ? [item.link] : []
+    // 找到目标节点，始终返回包含自己的路径
+    if (item.link === link) return [item.link]
 
+    // 在子节点中递归查找
     const childGroups = item.children && findActiveGroups(item.children, link)
     if (childGroups) return [item.link, ...childGroups]
   }
@@ -103,10 +127,26 @@ function handleOutlineClick(event: MouseEvent) {
 
   if (!link) return
 
+  // 阻止默认的锚点跳转行为
+  event.preventDefault()
+
   if (animationFrame) cancelAnimationFrame(animationFrame)
   animationFrame = 0
   navigationTarget = link
   activeLink.value = link
+
+  // 手动滚动到目标位置，使用自定义偏移
+  const targetElement = document.querySelector(link)
+  if (targetElement) {
+    const navHeight = 64  // 导航栏高度
+    const offset = 16     // 额外留白
+    const targetPosition = targetElement.getBoundingClientRect().top + window.scrollY - navHeight - offset
+
+    window.scrollTo({
+      top: targetPosition,
+      behavior: 'smooth'
+    })
+  }
 
   // Fallback for browsers that do not emit `scrollend`.
   scheduleNavigationEnd(500)
@@ -182,7 +222,10 @@ function toggleGroup(link: string) {
 
 watch(() => page.value.relativePath, () => {
   manualGroupStates.value.clear()
-})
+
+  const scrollContainer = root.value?.closest<HTMLElement>('.aside-container')
+  if (scrollContainer) scrollContainer.scrollTop = 0
+}, { flush: 'post' })
 
 watch(headers, () => {
   navigationTarget = null
@@ -213,6 +256,7 @@ onBeforeUnmount(() => {
 <template>
   <nav
     v-if="hasLocalNav"
+    ref="root"
     class="CollapsibleOutline"
     aria-labelledby="collapsible-outline-title"
     @click="handleOutlineClick"
@@ -295,10 +339,17 @@ onBeforeUnmount(() => {
 }
 
 .outline-title {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin-left: -16px;
+  padding-left: 16px;
   color: var(--vp-c-text-1);
   font-size: 14px;
   font-weight: 600;
   line-height: 32px;
+  background-color: var(--vp-c-surface-overlay);
+  backdrop-filter: blur(8px);
 }
 
 .outline-list {
@@ -325,12 +376,19 @@ onBeforeUnmount(() => {
   position: relative;
   display: block;
   min-width: 0;
+  margin-left: -8px;
+  padding: 4px 4px 4px 8px;
+  border-radius: 6px;
   color: var(--vp-c-text-2);
   font-size: 14px;
   font-weight: 400;
   line-height: var(--outline-row-height);
   white-space: nowrap;
-  transition: color 0.25s;
+  transition: color 0.25s, background-color 0.2s;
+}
+
+.outline-link:hover {
+  background: var(--vp-c-bg-soft);
 }
 
 .outline-link-text {
@@ -340,43 +398,21 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.outline-link::before,
-:deep(.outline-children .outline-link::before) {
-  position: absolute;
-  top: 7px;
-  width: 2px;
-  height: 18px;
-  border-radius: 2px;
-  content: "";
-  opacity: 0;
-  background-color: var(--vp-c-brand-1);
-  transition: opacity 0.15s;
-}
-
-.outline-link::before {
-  left: -17px;
+.outline-link:hover {
+  color: var(--vp-c-text-1);
 }
 
 :deep(.outline-children .outline-link) {
   position: relative;
 }
 
-:deep(.outline-children .outline-link::before) {
-  left: -31px;
-}
-
-:deep(.outline-children .outline-children .outline-link::before) {
-  left: -43px;
-}
-
-.outline-link.active::before,
-:deep(.outline-children .outline-link.active::before) {
-  opacity: 1;
-}
-
-.outline-link:hover,
 .outline-link.active {
-  color: var(--vp-c-text-1);
+  color: var(--vp-c-text-1);       /* 最深的文字色（接近黑色）*/
+  font-weight: 600;                /* 更粗的字重 */
+}
+
+.outline-link.active:hover {
+  background: var(--vp-c-bg-soft);
 }
 
 .outline-children-enter-active {

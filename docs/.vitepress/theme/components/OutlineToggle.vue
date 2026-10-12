@@ -32,6 +32,7 @@ const label = computed(() =>
 
 <style scoped>
 .outline-toggle {
+  position: relative;
   display: grid;
   width: var(--outline-toggle-size, 28px);
   height: var(--outline-toggle-size, 28px);
@@ -43,16 +44,25 @@ const label = computed(() =>
   color: var(--vp-c-text-3);
   background: transparent;
   place-items: center;
-  transition: color 0.2s, background-color 0.2s;
+  transition: color 0.2s, background-color 0.2s, transform 0.2s;
 }
 
-.outline-toggle:hover,
-.outline-toggle:focus-visible {
-  color: var(--vp-c-text-1);
-  background: var(--vp-c-bg-soft);
+/* 扩大触摸热区 */
+.outline-toggle::before {
+  position: absolute;
+  inset: -4px;
+  content: "";
+}
+
+.outline-toggle:hover {
+  color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
+  transform: scale(1.05);
 }
 
 .outline-toggle:focus-visible {
+  color: var(--vp-c-brand-1);
+  background: var(--vp-c-brand-soft);
   outline: 2px solid var(--vp-c-brand-1);
   outline-offset: 1px;
 }

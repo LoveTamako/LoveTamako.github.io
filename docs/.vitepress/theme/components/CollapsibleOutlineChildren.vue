@@ -86,12 +86,21 @@ function groupId(index: number) {
   position: relative;
   display: block;
   min-width: 0;
+  margin-left: -8px;
+  padding: 4px 4px 4px 8px;
+  border-radius: 6px;
   color: var(--vp-c-text-2);
   font-size: 13px;
   font-weight: 400;
   line-height: var(--outline-row-height, 32px);
   white-space: nowrap;
-  transition: color 0.25s;
+  opacity: 0.92;
+  transition: color 0.25s, background-color 0.2s, opacity 0.2s;
+}
+
+.outline-link:hover {
+  background: var(--vp-c-bg-soft);
+  opacity: 1;
 }
 
 .outline-link-text {
@@ -104,6 +113,23 @@ function groupId(index: number) {
 .outline-link:hover,
 .outline-link.active {
   color: var(--vp-c-text-1);
+}
+
+.outline-link.active {
+  color: var(--vp-c-text-1);       /* 最深的文字色 */
+  font-weight: 600;                /* 更粗的字重 */
+  opacity: 1;
+}
+
+/* 三级标题样式微调 */
+.outline-children .outline-children .outline-link {
+  font-size: 12.5px;
+  opacity: 0.85;
+}
+
+.outline-children .outline-children .outline-link:hover,
+.outline-children .outline-children .outline-link.active {
+  opacity: 1;
 }
 
 .outline-nested-enter-active {
