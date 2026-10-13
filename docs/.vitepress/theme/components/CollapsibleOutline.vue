@@ -409,11 +409,7 @@ onBeforeUnmount(() => {
   font-weight: 400;
   line-height: var(--outline-row-height);
   white-space: nowrap;
-  transition: color 0.25s, background-color 0.2s;
-}
-
-.outline-link:hover {
-  background: var(--vp-c-bg-soft);
+  transition: color 0.25s;
 }
 
 .outline-link-text {
@@ -424,7 +420,7 @@ onBeforeUnmount(() => {
 }
 
 .outline-link:hover {
-  color: var(--vp-c-text-1);
+  color: var(--vp-c-brand-1);
 }
 
 :deep(.outline-children .outline-link) {
@@ -432,12 +428,7 @@ onBeforeUnmount(() => {
 }
 
 .outline-link.active {
-  color: var(--vp-c-text-1);       /* 最深的文字色（接近黑色）*/
-  font-weight: 600;                /* 更粗的字重 */
-}
-
-.outline-link.active:hover {
-  background: var(--vp-c-bg-soft);
+  color: var(--vp-c-brand-1);
 }
 
 .outline-children-enter-active {
