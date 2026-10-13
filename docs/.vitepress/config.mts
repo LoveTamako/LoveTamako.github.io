@@ -8,6 +8,10 @@ export default defineConfig({
   title: "LoveTamako个人博客",
   lastUpdated: true,
   description: "LoveTamako个人博客",
+  scrollOffset: {
+    selector: ['.VPLocalNav', '.VPNav'],
+    padding: 12
+  },
   markdown: {
     config(md) {
       readingTimeMarkdownPlugin(md)

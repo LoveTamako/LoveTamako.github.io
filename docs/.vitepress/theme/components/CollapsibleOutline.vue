@@ -35,9 +35,8 @@ const expandedGroups = computed(() => {
   // 2. 自动展开当前激活项的父级路径
   //    但只对"没有手动状态"的项生效
   if (activeLink.value) {
-    const activeAncestors = findActiveGroups(headers.value, activeLink.value) ?? []
     // 只展开父级路径，不展开激活项自己的子级
-    const pathToActive = activeAncestors.slice(0, -1)
+    const pathToActive = activeGroups.value.slice(0, -1)
 
     for (const link of pathToActive) {
       // 关键修改：只有当用户没有手动设置过该项的状态时，才自动展开
@@ -57,8 +56,11 @@ const expandedGroups = computed(() => {
 })
 
 const visibleActiveLink = computed(() => {
-  // 直接返回当前激活的链接，因为我们已经在 expandedGroups 中
-  // 确保其父级路径是展开的，所以激活项一定可见
+  // Stop at the first collapsed ancestor; its descendants are hidden.
+  for (const link of activeGroups.value) {
+    if (!expandedGroups.value.has(link)) return link
+  }
+
   return activeLink.value
 })
 
@@ -75,6 +77,29 @@ const outlineTitle = computed(() => {
 let animationFrame = 0
 let navigationTarget: string | null = null
 let navigationEndTimer: ReturnType<typeof setTimeout> | undefined
+let outlineResizeObserver: ResizeObserver | undefined
+
+function scrollActiveLinkIntoView() {
+  const scrollContainer = root.value?.closest<HTMLElement>('.aside-container')
+  const link = root.value?.querySelector<HTMLElement>('.outline-link.active')
+
+  if (!scrollContainer || !link || !scrollContainer.clientHeight) return
+
+  const containerRect = scrollContainer.getBoundingClientRect()
+  const linkRect = link.getBoundingClientRect()
+  const titleHeight = root.value?.querySelector<HTMLElement>('.outline-title')
+    ?.offsetHeight ?? 0
+  // Keep the active link clear of the sticky title and the viewport edges.
+  const visibleTop = containerRect.top + scrollContainer.clientTop + titleHeight + 8
+  const visibleBottom = containerRect.top + scrollContainer.clientTop
+    + scrollContainer.clientHeight - 8
+
+  if (linkRect.top < visibleTop) {
+    scrollContainer.scrollTop += linkRect.top - visibleTop
+  } else if (linkRect.bottom > visibleBottom) {
+    scrollContainer.scrollTop += linkRect.bottom - visibleBottom
+  }
+}
 
 function findActiveGroups(
   items: DefaultTheme.OutlineItem[],
@@ -204,6 +229,21 @@ function toggleGroup(link: string) {
   manualGroupStates.value.set(link, !expandedGroups.value.has(link))
 }
 
+watch([visibleActiveLink, expandedGroups], scrollActiveLinkIntoView, {
+  flush: 'post'
+})
+
+watch(root, (outline) => {
+  outlineResizeObserver?.disconnect()
+
+  const scrollContainer = outline?.closest<HTMLElement>('.aside-container')
+  if (!outline || !scrollContainer) return
+
+  outlineResizeObserver = new ResizeObserver(scrollActiveLinkIntoView)
+  outlineResizeObserver.observe(outline)
+  outlineResizeObserver.observe(scrollContainer)
+}, { flush: 'post' })
+
 watch(() => page.value.relativePath, () => {
   manualGroupStates.value.clear()
 
@@ -234,6 +274,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', queueActiveLinkUpdate)
   if (navigationEndTimer) clearTimeout(navigationEndTimer)
   if (animationFrame) cancelAnimationFrame(animationFrame)
+  outlineResizeObserver?.disconnect()
 })
 </script>
 
