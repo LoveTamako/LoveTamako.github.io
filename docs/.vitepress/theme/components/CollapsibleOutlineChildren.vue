@@ -66,7 +66,7 @@ function groupId(index: number) {
 <style scoped>
 .outline-children {
   margin: 0;
-  padding: 0 0 4px 14px;
+  padding: 0 0 0 14px;
   list-style: none;
 }
 
@@ -87,7 +87,7 @@ function groupId(index: number) {
   display: block;
   min-width: 0;
   margin-left: -8px;
-  padding: 4px 4px 4px 8px;
+  padding: 0 4px 0 8px;
   border-radius: 6px;
   color: var(--vp-c-text-2);
   font-size: 13px;
@@ -104,7 +104,9 @@ function groupId(index: number) {
 }
 
 .outline-link.active {
-  color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-1);
+  font-weight: 700;
+  opacity: 1;
 }
 
 .outline-link-text {
@@ -117,6 +119,9 @@ function groupId(index: number) {
 /* 三级标题样式微调 */
 .outline-children .outline-children .outline-link {
   font-size: 12.5px;
+}
+
+.outline-children .outline-children .outline-link:not(.active) {
   opacity: 0.85;
 }
 

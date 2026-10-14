@@ -402,7 +402,7 @@ onBeforeUnmount(() => {
   display: block;
   min-width: 0;
   margin-left: -8px;
-  padding: 4px 4px 4px 8px;
+  padding: 0 4px 0 8px;
   border-radius: 6px;
   color: var(--vp-c-text-2);
   font-size: 14px;
@@ -428,7 +428,8 @@ onBeforeUnmount(() => {
 }
 
 .outline-link.active {
-  color: var(--vp-c-brand-1);
+  color: var(--vp-c-text-1);
+  font-weight: 700;
 }
 
 .outline-children-enter-active {

@@ -210,6 +210,19 @@ body {
     radial-gradient(circle at 88% 12%, rgba(255, 255, 255, 0.04), transparent 22%);
 }
 
+/* Make the active entries in both desktop directories easy to scan in dark mode. */
+.dark .VPSidebarItem.is-active > .item > .link > .text {
+  color: var(--vp-c-text-1);
+  font-weight: 650;
+}
+
+.dark .CollapsibleOutline .outline-link.active,
+.dark .MobileCollapsibleOutline .outline-link.active {
+  color: var(--vp-c-text-1);
+  font-weight: 700;
+  opacity: 1;
+}
+
 /* 右栏背景透明，移除默认主题底部的纯色渐变遮罩，避免形成突兀的色块。 */
 .VPDoc .aside .aside-curtain {
   display: none;
