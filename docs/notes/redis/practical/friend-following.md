@@ -424,8 +424,6 @@ public Result followCommons(Long targetUserId) {
 
 关注推送也叫 Feed 流，直译为**投喂**，为用户持续提供"沉浸式"的内容体验。通过无限下拉刷新获取新信息，是社交产品的核心功能之一。
 
-**传统模式 vs Feed 模式：**
-
 - **传统模式**：用户主动检索信息（搜索驱动）
 - **Feed 模式**：内容主动匹配用户（推荐驱动）
 
@@ -465,13 +463,11 @@ Feed 流产品有两种常见的内容组织模式：
 本例中的个人页面是基于关注的好友来做 Feed 流，因此采用 **Timeline 模式**，按照发布时间倒序展示关注用户的最新笔记。
 :::
 
-### Timeline 的三种实现方案
+### Feed 流的实现方案
 
-Timeline 模式的实现方案有三种，分别对应不同的读写策略：
+Feed 流的实现方案有三种，分别对应不同的读写策略：
 
-#### 方案对比
-
-| 实现方案 | 别名 | 写操作成本 | 读操作成本 | 用户读取延迟 | 实现难度 | 适用场景 |
+|  | 别名 | 写操作成本 | 读操作成本 | 用户读取延迟 | 实现难度 | 适用场景 |
 |---------|------|----------|----------|------------|---------|---------|
 | **拉模式** | 读扩散 | 低 | 高 | 高 | 简单 | 很少使用（性能差） |
 | **推模式** | 写扩散 | 高 | 低 | 低 | 简单 | 用户量少、没有大 V |
@@ -494,6 +490,53 @@ Timeline 模式的实现方案有三种，分别对应不同的读写策略：
 - ✅ 写入简单，发布内容时只需保存到自己的发件箱
 - ❌ 读取慢，需要查询多个用户的内容并排序
 - ❌ 关注用户越多，查询越慢（典型的 N+1 查询问题）
+
+::: tip 什么是 N+1 查询问题？
+
+**N+1 查询问题** 是数据库查询中的经典性能陷阱，指的是：为了获取一批关联数据，先执行 1 次主查询获取 N 条记录，然后针对每条记录再执行 1 次子查询，总共执行了 **1 + N** 次数据库查询。
+
+**示例场景：**
+
+假设用户关注了 100 个人，使用拉模式获取 Feed 流时：
+
+```java
+// 1 次查询：获取关注列表
+List<Long> followIds = getFollowList(userId);  // 返回 100 个用户 ID
+
+// N 次查询：分别获取每个用户的最新笔记
+List<Blog> feedList = new ArrayList<>();
+for (Long followId : followIds) {
+    Blog blog = getBlogByUserId(followId);  // 执行 100 次数据库查询！
+    feedList.add(blog);
+}
+```
+
+这样就产生了 **1 + 100 = 101 次数据库查询**，性能极差。
+
+**解决方案：**
+
+1. **批量查询（IN 查询）**：
+   ```java
+   // 1 次主查询 + 1 次批量查询 = 2 次
+   List<Long> followIds = getFollowList(userId);
+   List<Blog> blogs = blogMapper.selectList(
+       new LambdaQueryWrapper<Blog>()
+           .in(Blog::getUserId, followIds)
+   );
+   ```
+
+2. **联表查询（JOIN）**：
+   ```sql
+   SELECT b.* FROM tb_blog b
+   INNER JOIN tb_follow f ON b.user_id = f.follow_user_id
+   WHERE f.user_id = #{userId}
+   ORDER BY b.create_time DESC
+   ```
+
+3. **缓存预计算（推模式）**：提前将内容推送到用户的收件箱，读取时无需关联查询。
+
+本节采用的推模式就是为了避免 N+1 查询问题，通过写时预计算换取读时的高性能。
+:::
 
 #### 2. 推模式（写扩散）
 
@@ -534,6 +577,8 @@ feed:userId:2 → [blogId:100, blogId:98, blogId:96, ...]  // 用户 2 的收件
    - 再主动拉取关注的大 V 的最新内容
    - 合并排序后返回
 
+![推拉结合示意](image.png)
+
 **优缺点分析：**
 
 - ✅ 兼顾读写性能，适合大规模应用
@@ -543,17 +588,299 @@ feed:userId:2 → [blogId:100, blogId:98, blogId:96, ...]  // 用户 2 的收件
 
 **适用场景：** 微博、B 站等千万级用户的社交平台
 
-![推拉结合示意](image.png)
 
-#### 方案选择
+### 基于推模式实现关注推送
 
-
-::: tip 本节方案选择
-本节采用 **推模式（写扩散）** 实现 Feed 流，原因如下：
+前面已经了解了三种 Feed 流实现方案，本节将具体实现基于推模式的关注推送功能。原因如下：
 
 1. **实现简单**：读取逻辑清晰，无需复杂的多表联查
 2. **读取性能优秀**：用户刷新 Feed 时直接从 Redis 收件箱获取，延迟极低
 3. **场景匹配**：教学项目用户量小，没有大 V，推模式的写入成本可接受
 
-生产环境中，如果遇到大 V 或用户量激增，可以考虑升级为推拉结合模式。
+::: warning 生产环境建议
+推模式适合中小规模应用。如果遇到大 V（百万粉丝）或用户量激增，发布一条内容需要写入百万次，会导致严重的性能问题。此时应考虑升级为**推拉结合模式**。
+:::
+
+#### 核心需求
+
+1. **发布推送**：用户发布探店笔记时，将笔记 ID 推送到所有粉丝的收件箱
+2. **时间排序**：收件箱中的笔记按照发布时间倒序排列，最新的在最前面
+3. **分页查询**：用户查询 Feed 流时，支持滚动分页加载
+
+#### 数据结构
+
+推模式需要为每个用户维护一个收件箱，存储关注用户推送的笔记 ID。Redis 提供了两种可选的数据结构：**List** 和 **Sorted Set（ZSet）**。
+
+本节选择 **Sorted Set（ZSet）**，原因如下：
+
+1. **天然支持排序**：使用发布时间戳作为 score，自动按时间倒序排列
+2. **支持滚动分页**：可以通过 score（时间戳）实现基于时间的游标分页
+3. **自动去重**：同一篇笔记不会重复出现在收件箱中（虽然实际场景中重复推送的可能性低）
+
+**存储结构设计：**
+
+```
+Key: feed:userId:{userId}
+Type: ZSet
+Member: blogId（笔记 ID）
+Score: timestamp（发布时间戳，毫秒级）
+
+示例：
+feed:userId:1 → {(blogId:100, 1697520000000), (blogId:99, 1697519000000), ...}
+```
+
+使用 `ZADD` 推送笔记，使用 `ZREVRANGEBYSCORE` 按时间倒序查询（最新的在前）。
+
+#### 改造发布笔记接口
+
+修改 [发布探店笔记](./blogger-follow.md#发布笔记接口) 中的 `saveBlog()` 方法，在保存笔记到数据库后，推送到所有粉丝的收件箱。
+
+```java
+@Override
+public Result saveBlog(Blog blog) {
+    // 1. 获取当前登录用户
+    UserDTO user = UserHolder.getUser();
+    blog.setUserId(user.getId());
+
+    // 2. 保存笔记到数据库
+    boolean success = save(blog);
+    if (!success) {
+        return Result.fail("发布笔记失败！");
+    }
+
+    // 3. 查询当前用户的所有粉丝
+    List<Follow> follows = followService.query()
+        .eq("follow_user_id", user.getId())
+        .list();
+
+    // 4. 推送笔记 ID 到所有粉丝的收件箱
+    for (Follow follow : follows) {
+        // 粉丝的收件箱 key
+        String key = "feed:userId:" + follow.getUserId();
+        // 使用当前时间戳作为 score，笔记 ID 作为 member
+        stringRedisTemplate.opsForZSet().add(key, blog.getId().toString(), System.currentTimeMillis());
+    }
+
+    // 5. 返回笔记 ID
+    return Result.ok(blog.getId());
+}
+```
+
+**关键实现点：**
+
+1. **查询粉丝列表**：通过 `follow_user_id = 当前用户ID` 查询所有粉丝
+2. **ZSet 推送**：使用 `ZADD` 将笔记 ID 存入粉丝的收件箱，score 为当前时间戳
+
+::: warning 性能优化建议
+当前实现是**同步推送**，如果某个用户有数万粉丝，发布笔记会非常慢。生产环境中建议：
+
+1. **异步推送**：将推送任务放入消息队列（RabbitMQ、Kafka），由消费者异步处理
+2. **批量操作**：使用 Redis Pipeline 批量写入，减少网络开销
+3. **限流保护**：对大 V 的推送进行限流，防止 Redis 压力过大
+:::
+
+
+#### 滚动分页查询
+
+在个人主页的关注卡片中，查询并展示推送的 Blog 信息。
+
+Feed 流的数据会不断更新，数据的角标也在不断变化，传统的分页方式（基于页码或偏移量）会导致**数据重复或遗漏**问题，因此需要采用滚动分页方案。
+
+:::tip 传统分页为什么会导致数据重复或遗漏
+传统分页使用 `LIMIT offset, size` 基于**位置偏移**查询数据，在 Feed 流这种动态数据场景下会出现问题。
+
+**举个例子：**
+
+收件箱有 10 条笔记（时间戳 1-10，数字越大越新），每页显示 5 条，按时间倒序排列。
+
+1. **第 1 页**：`LIMIT 0, 5` 查询到时间戳 10, 9, 8, 7, 6 的笔记
+2. 此时有 1 条新笔记（时间戳 11）发布
+3. **第 2 页**：`LIMIT 5, 5` 本想查询剩余的 5 条笔记
+
+**问题出现：**
+
+新笔记插入后，收件箱变成：11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1
+
+`LIMIT 5, 5` 跳过前 5 条（时间戳 11, 10, 9, 8, 7），查询到的是：**时间戳 6, 5, 4, 3, 2**
+
+结果：
+- **时间戳 6 重复了**（第 1 页已经看过）
+- **时间戳 1 遗漏了**（永远看不到）
+
+**根本原因：** 传统分页依赖位置索引，而新数据插入会导致所有数据位置后移。
+
+**滚动分页的解决方案：** 第 1 页记录最后一条的时间戳 6，第 2 页查询"时间戳 < 6 的数据"，返回时间戳 5, 4, 3, 2, 1。无论新数据如何插入，查询条件始终是"< 6"，不会重复也不会遗漏。
+:::
+
+##### 接口设计
+
+| 项目 | 内容 |
+|------|------|
+| 请求方式 | GET |
+| 请求路径 | `/blog/of/follow` |
+| 请求参数 | `lastId`（上次查询的最小时间戳，首次传当前时间戳）<br>`offset`（偏移量，默认 0） |
+| 返回结果 | `Result` 对象，`data` 为 `ScrollResult` |
+
+**返回数据结构：**
+
+```java
+@Data
+public class ScrollResult {
+    private List<?> list;       // 笔记列表
+    private Long minTime;       // 本次查询的最小时间戳
+    private Integer offset;     // 偏移量（同一时间戳下的偏移）
+}
+```
+
+**参数设计说明：**
+
+接口使用 Redis 的 `ZREVRANGEBYSCORE` 命令实现滚动分页：
+
+```bash
+ZREVRANGEBYSCORE key max min WITHSCORES LIMIT offset count
+
+# 首次查询：获取当前时间之前的最新 5 条笔记
+ZREVRANGEBYSCORE feed:userId:1 1697520000000 0 WITHSCORES LIMIT 0 5
+
+# 第 2 页：lastId 为上次的最小时间戳 1697510000000，offset 为 0
+ZREVRANGEBYSCORE feed:userId:1 1697510000000 0 WITHSCORES LIMIT 0 5
+
+# 处理同一时间戳：如果上次最小时间戳为 1697510000000，且有 3 条相同时间戳的笔记
+# 此时 lastId 仍为 1697510000000，offset 为 3（跳过已读取的 3 条）
+ZREVRANGEBYSCORE feed:userId:1 1697510000000 0 WITHSCORES LIMIT 3 5
+```
+
+参数映射关系：
+
+| 接口参数 | Redis 参数 | 说明 |
+|---------|-----------|------|
+| `lastId` | `max` | 上次查询的最小时间戳，作为本次查询的上限。首次查询传当前时间戳 |
+| `offset` | `offset` | 偏移量，用于跳过同一时间戳下已读取的数据。取值为上次结果中与最小时间戳相同的元素个数 |
+| - | `min` | 固定为 `0`，表示查询时间戳的下限 |
+| - | `count` | 固定为 `5`，表示每页返回的笔记条数 |
+
+##### 实现思路
+
+1. 获取当前登录用户的收件箱 key：`feed:userId:{userId}`
+2. 使用 Redis 的 `ZREVRANGEBYSCORE` 命令查询 score ≤ lastId 的前 N 条数据
+3. 解析查询结果，记录最小时间戳和 offset（处理同一时间戳的情况）
+4. 根据笔记 ID 列表查询数据库，获取笔记详情
+5. 补充笔记作者信息（昵称、头像）
+6. 封装返回结果（笔记列表、minTime、offset）
+
+##### 代码实现
+
+**Controller 层：**
+
+在 `BlogController` 中增加以下方法：
+
+```java
+/**
+ * 查询关注用户的 Feed 流（滚动分页）
+ */
+@GetMapping("/of/follow")
+public Result queryBlogOfFollow(
+    @RequestParam("lastId") Long lastId,
+    @RequestParam(value = "offset", defaultValue = "0") Integer offset) {
+    return blogService.queryBlogOfFollow(lastId, offset);
+}
+```
+
+**Service 接口：**
+
+在 `IBlogService` 中增加方法声明：
+
+```java
+Result queryBlogOfFollow(Long lastId, Integer offset);
+```
+
+**Service 层：**
+
+在 `BlogServiceImpl` 中增加以下方法：
+
+```java
+@Override
+public Result queryBlogOfFollow(Long lastId, Integer offset) {
+    // 1. 获取当前登录用户
+    Long userId = UserHolder.getUser().getId();
+    String key = "feed:userId:" + userId;
+
+    // 2. 查询收件箱：ZREVRANGEBYSCORE key max min LIMIT offset count
+    Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
+        .reverseRangeByScoreWithScores(key, 0, lastId, offset, 3);
+
+    // 3. 判断是否为空
+    if (typedTuples == null || typedTuples.isEmpty()) {
+        return Result.ok();
+    }
+
+    // 4. 解析数据：blogId、minTime（最小时间戳）、offset（偏移量）
+    List<Long> ids = new ArrayList<>(typedTuples.size());
+    long minTime = 0;  // 记录本次查询的最小时间戳
+    int newOffset = 1; // 记录与最小时间戳相同的元素个数
+
+    for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
+        // 获取笔记 ID
+        ids.add(Long.valueOf(tuple.getValue()));
+        // 获取分数（时间戳）
+        long time = tuple.getScore().longValue();
+
+        // 记录最小时间戳
+        if (time == minTime) {
+            // 如果与上一个时间戳相同，offset 加 1
+            newOffset++;
+        } else {
+            // 如果是新的更小的时间戳，重置 offset
+            minTime = time;
+            newOffset = 1;
+        }
+    }
+
+    // 5. 根据 ID 查询笔记详情
+    String idStr = StrUtil.join(",", ids);
+    List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
+
+    // 6. 查询笔记作者信息
+    for (Blog blog : blogs) {
+        // 查询用户信息
+        User user = userService.getById(blog.getUserId());
+        blog.setName(user.getNickName());
+        blog.setIcon(user.getIcon());
+        // 查询当前用户是否点赞过该笔记（如果有点赞功能）
+        // isBlogLiked(blog);
+    }
+
+    // 7. 封装返回结果
+    ScrollResult result = new ScrollResult();
+    result.setList(blogs);
+    result.setMinTime(minTime);
+    result.setOffset(newOffset);
+
+    return Result.ok(result);
+}
+```
+
+**关键实现点：**
+
+1. **滚动分页查询**：
+   - 使用 `reverseRangeByScoreWithScores()` 查询 score ≤ lastId 的前 N 条数据
+   - `reverseRange` 表示倒序（从大到小），最新的笔记在前
+   - `WithScores` 表示同时返回 member 和 score
+
+2. **处理同一时间戳**：
+   - 如果多个笔记的发布时间戳相同，需要使用 offset 区分
+   - 记录最小时间戳以及与该时间戳相同的元素个数
+
+3. **保持查询顺序**：
+   - Redis 返回的数据已按 score 排序
+   - MySQL 查询时使用 `ORDER BY FIELD(id, ...)` 保持相同的顺序
+
+::: tip offset 的作用
+`offset` 用于处理**同一时间戳**下的分页问题。
+
+**场景：** 假设有 5 条笔记的时间戳都是 `1697520000000`，首次查询返回 3 条，则：
+- `minTime = 1697520000000`
+- `offset = 3`
+
+下次查询时，传入 `lastId = 1697520000000, offset = 3`，会跳过前 3 条，返回剩余 2 条。
 :::
