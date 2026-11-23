@@ -112,27 +112,305 @@ HTTP 协议只规定了请求和响应的交互方式，并没有定义客户端
 
 :::
 
+## 3. 统一 HTTP 调用层设计
 
+前面已经将 HTTP 调用结果划分为 `COMPLETED`、`FAILED` 和 `UNKNOWN` 三种状态。接下来，我们将基于现有 Java HTTP Client，在其之上增加一层轻量级封装，统一处理 HTTP 请求、响应以及调用结果的识别与转换。
 
-## 3. 不同场景下的 HTTP 调用
+本章以 JDK `HttpClient` 为例，介绍这层统一调用逻辑的设计与实现。
 
-### 3.1 前端调用后端
+### 3.1 整体设计与代码结构
 
-### 3.2 微服务之间调用
+在正式编写代码之前，先通过下面的目录结构了解统一 HTTP 调用层的整体设计。
 
-### 3.3 调用第三方 HTTP 接口
+```
+http/
+├── CallStatus.java              // 定义 HTTP 调用结果状态
+├── CallResult.java              // 封装调用状态、HTTP 响应和异常信息
+├── FailureClassifier.java       // 定义异常分类接口
+├── JdkFailureClassifier.java    // 实现 JDK HttpClient 异常分类策略
+└── HttpCallExecutor.java        // 执行 HTTP 请求并转换调用结果
+```
 
-## 4. HTTP 调用的可靠性设计
+从职责上来看，统一 HTTP 调用层主要包含三个部分：
 
-### 4.1 超时控制
+1. 调用结果模型：由 CallStatus 和 CallResult 实现。CallStatus 定义 HTTP 调用结果状态，CallResult 负责封装调用状态、HTTP 响应和异常信息。
+2. 异常分类：由 FailureClassifier 和 JdkFailureClassifier 实现。FailureClassifier 定义异常分类接口，JdkFailureClassifier 提供基于 JDK HttpClient 的异常分类实现。
+3. HTTP 请求执行：由 HttpCallExecutor 实现，负责调用底层 HTTP Client，并根据请求执行结果或发生的异常，生成统一的调用结果。
 
-### 4.2 重试机制
+这些类之间的关系可以概括为：
 
-### 4.3 幂等性设计
+```text
+                 HttpCallExecutor
+                        |
+             +----------+----------+
+             |                     |
+             v                     v
+         HttpClient         FailureClassifier
+             |                     |
+             v                     v
+         HTTP 响应               异常分类
+             |                     |
+             +----------+----------+
+                        |
+                        v
+                    CallResult
+                        |
+                        v
+                    CallStatus
+```
 
-### 4.4 熔断、限流与隔离
+其中，HttpCallExecutor 是整个调用层的核心入口，负责协调 HTTP 请求执行、异常分类和结果转换。当 HTTP 请求正常完成并收到完整响应时，执行器将响应封装为 COMPLETED 结果；当请求执行过程中发生异常时，则通过 FailureClassifier 判断调用结果属于 FAILED 还是 UNKNOWN，再统一封装为 CallResult。
 
-### 4.5 状态查询、补偿与对账
+通过引入 FailureClassifier，执行器不需要直接处理某一种 HTTP Client 特有的异常分类规则，从而将请求执行与异常分类解耦。后续如果需要适配 Apache HttpClient 或 OkHttp，只需要根据对应客户端的异常特点提供相应的分类实现，就可以复用统一的调用结果模型和执行器设计。
+
+接下来，我们按照代码之间的依赖关系，逐个实现这些类。
+
+### 3.2 调用结果模型
+
+首先定义调用结果状态，对应第二章介绍的三种调用结果：
+
+```java
+public enum CallStatus {
+
+    /**
+     * 已收到完整 HTTP 响应
+     */
+    COMPLETED,
+
+    /**
+     * 能够确认请求尚未发送
+     */
+    FAILED,
+
+    /**
+     * 无法确认远端执行结果
+     */
+    UNKNOWN
+}
+```
+
+接下来定义统一的调用结果对象 `CallResult`，用于封装一次 HTTP 调用的最终结果。
+
+不同调用状态需要保留的信息有所不同：`COMPLETED` 表示已经收到完整 HTTP 响应，因此需要保存响应对象；`FAILED` 和 `UNKNOWN` 通常没有完整响应，需要保存异常信息，方便上层分析调用失败的原因。
+
+可以使用一个泛型类统一表示：
+
+```java
+public record CallResult<T>(
+        CallStatus status,
+        T response,
+        Throwable cause
+) {
+
+    public static <T> CallResult<T> completed(T response) {
+        return new CallResult<>(CallStatus.COMPLETED, response, null);
+    }
+
+    public static <T> CallResult<T> failed(Throwable cause) {
+        return new CallResult<>(CallStatus.FAILED, null, cause);
+    }
+
+    public static <T> CallResult<T> unknown(Throwable cause) {
+        return new CallResult<>(CallStatus.UNKNOWN, null, cause);
+    }
+}
+```
+
+这里使用泛型 `T`，是为了避免调用结果模型与某个具体 HTTP 客户端绑定。例如，JDK `HttpClient` 可以使用 `HttpResponse<byte[]>` 作为响应类型，其他客户端也可以使用各自的响应对象。
+
+这样，`CallResult` 不需要关心底层使用的是哪一种 HTTP Client，只需要统一保存调用状态、响应对象和异常信息即可。
+
+目前这个结果对象只保留三个核心信息：调用状态、HTTP 响应和异常原因。它们分别解决了三个问题：本次调用处于什么状态、是否获得了完整响应，以及如果没有完成调用，发生了什么异常。
+
+需要注意，`CallResult` 只是调用结果的统一表达，并不负责判断调用状态是否正确。具体的结果分类由后面的异常分类组件和 HTTP 请求执行器完成。
+
+### 3.3 异常分类与结果转换
+
+定义好调用结果模型之后，还需要解决一个问题：当 HTTP 请求执行过程中发生异常时，应该如何判断属于 `FAILED` 还是 `UNKNOWN`？
+
+前面已经分析过，不能简单根据异常类型判断调用结果。相同类型的异常可能发生在不同执行阶段，而不同 HTTP Client 对请求执行阶段的暴露程度也不一样。
+
+因此，可以将异常分类逻辑独立出来，定义一个统一接口：
+
+```java
+public interface FailureClassifier {
+
+    /**
+     * 根据异常判断 HTTP 调用结果
+     */
+    CallStatus classify(Throwable cause);
+}
+```
+
+这个接口只负责异常分类，不负责执行 HTTP 请求，也不负责处理 HTTP 响应。这样，执行器就不需要了解不同客户端的具体异常类型，只需要调用统一的分类接口即可。
+
+接下来，以 JDK `HttpClient` 为例，提供一个默认实现：
+
+```java
+public class JdkFailureClassifier implements FailureClassifier {
+
+    @Override
+    public CallStatus classify(Throwable cause) {
+
+        // 无法确认请求是否已经发送，
+        // 采用保守策略，返回 UNKNOWN。
+        return CallStatus.UNKNOWN;
+    }
+}
+```
+
+这里可能会产生一个疑问：为什么没有根据 `ConnectException`、`HttpConnectTimeoutException` 等异常类型直接返回 `FAILED`？
+
+原因在于，异常类型本身并不能始终证明 HTTP 请求尚未发送。只有能够结合具体执行阶段，确认请求数据尚未发送时，才能判定为 `FAILED`。
+
+JDK `HttpClient` 的常规同步调用接口并没有提供一个通用的请求发送进度信息，让应用能够在所有异常情况下准确判断请求是否已经发送。因此，对于无法确认的异常，默认返回 `UNKNOWN` 更安全。
+
+这并不意味着 JDK `HttpClient` 的所有异常都必然属于 `UNKNOWN`，而是说明仅凭当前分类器能够获取的信息，不应该冒险将异常归类为 `FAILED`。如果后续能够通过更具体的执行阶段信息证明请求尚未发送，就可以在对应的分类实现中增加更精确的判断。
+
+例如，其他 HTTP Client 如果能够提供明确的连接阶段或请求发送阶段信息，就可以实现自己的 `FailureClassifier`，在有充分依据时返回 `FAILED`。
+
+通过这种方式，异常分类规则与 HTTP 请求执行逻辑分离，既方便针对不同客户端进行适配，也避免将某一种客户端的异常处理规则写死在统一调用层中。
+
+### 3.4 HTTP 请求执行器
+
+完成调用结果模型和异常分类之后，就可以实现真正的 HTTP 请求执行器。
+
+这里使用 JDK 提供的 `java.net.http.HttpClient` 发送请求，并通过前面定义的 `FailureClassifier` 处理执行过程中发生的异常。
+
+首先定义 `HttpCallExecutor`：
+
+```java
+public class HttpCallExecutor {
+
+    private final HttpClient client;
+
+    private final FailureClassifier failureClassifier;
+
+    public HttpCallExecutor(
+            HttpClient client,
+            FailureClassifier failureClassifier) {
+
+        this.client = client;
+        this.failureClassifier = failureClassifier;
+    }
+
+    public CallResult<HttpResponse<byte[]>> execute(
+            HttpRequest request) {
+
+        try {
+            HttpResponse<byte[]> response = client.send(
+                    request,
+                    HttpResponse.BodyHandlers.ofByteArray()
+            );
+
+            return CallResult.completed(response);
+
+        } catch (InterruptedException e) {
+
+            // 恢复线程中断标记
+            Thread.currentThread().interrupt();
+
+            return CallResult.unknown(e);
+
+        } catch (IOException e) {
+
+            CallStatus status = failureClassifier.classify(e);
+
+            if (status == CallStatus.FAILED) {
+                return CallResult.failed(e);
+            }
+
+            return CallResult.unknown(e);
+        }
+    }
+}
+```
+
+这个类是整个统一调用层的核心。它持有底层 `HttpClient` 和异常分类器，对外提供统一的 `execute()` 方法。业务代码只需要提交一个 `HttpRequest`，就可以获得统一的 `CallResult`，不需要直接处理底层客户端的异常分类逻辑。
+
+下面按照实际执行顺序分析这段代码。
+
+首先，执行器调用 `client.send()` 发送 HTTP 请求，并使用 `BodyHandlers.ofByteArray()` 接收响应体。该处理方式会在响应体读取完成后返回，因此当 `send()` 正常返回时，可以将本次调用判定为 `COMPLETED`。
+
+这里需要特别注意，不能仅仅因为收到了响应状态码和响应头，就认为调用已经完成。如果响应体还没有读取完成，后续仍然可能发生读取超时或连接中断。因此，当前实现选择将响应体完整读取作为调用完成的判断条件。
+
+如果执行过程中抛出 `IOException`，执行器不会直接将其判定为 `FAILED`，而是交给 `FailureClassifier` 进行分类。只有分类器能够确认请求尚未发送时，才返回 `FAILED`；否则返回 `UNKNOWN`。
+
+对于 `InterruptedException`，则采用保守处理。因为线程中断可能发生在请求执行过程中的不同阶段，仅凭中断异常无法确认请求是否已经发送，所以返回 `UNKNOWN`，同时恢复线程的中断标记，避免中断状态丢失。
+
+另外，这里没有捕获所有 `RuntimeException`。例如，空指针、错误的参数使用等编程问题，不应该被当成普通的 HTTP 通信异常吞掉，而应该继续向外抛出，交由上层发现和处理。
+
+至此，统一调用层已经具备最基本的执行能力：正常收到完整响应时返回 `COMPLETED`，发生通信异常时通过分类器判断，无法确认请求是否发送时返回 `UNKNOWN`。
+
+需要说明的是，当前 `JdkFailureClassifier` 采用保守策略，因此这个最小实现尚不能主动识别所有 `FAILED` 场景。它优先保证结果分类不会因为错误判断而将可能已经发送的请求误认为未发送。这也是在实际项目中设计调用结果分类时需要遵循的原则。
+
+### 3.5 完整调用示例
+
+完成上述类的定义之后，就可以将它们组合起来，形成一次完整的 HTTP 调用。
+
+首先，创建 JDK `HttpClient`，并初始化统一调用执行器：
+
+```java
+HttpClient client = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(3))
+        .build();
+
+HttpCallExecutor executor = new HttpCallExecutor(
+        client,
+        new JdkFailureClassifier()
+);
+```
+
+接下来，构造一个 HTTP 请求：
+
+```java
+HttpRequest request = HttpRequest.newBuilder()
+        .uri(URI.create("https://example.com/api/orders"))
+        .header("Content-Type", "application/json")
+        .POST(HttpRequest.BodyPublishers.ofString(
+                "{\"productId\": 1001}"
+        ))
+        .build();
+```
+
+然后通过统一调用执行器发送请求：
+
+```java
+CallResult<HttpResponse<byte[]>> result =
+        executor.execute(request);
+```
+
+业务代码不再需要直接处理 JDK `HttpClient` 的各种异常，而是根据统一的 `CallStatus` 处理调用结果：
+
+```java
+switch (result.status()) {
+
+    case COMPLETED -> {
+        HttpResponse<byte[]> response = result.response();
+
+        int statusCode = response.statusCode();
+        byte[] body = response.body();
+
+        // 根据 HTTP 状态码和响应内容判断业务结果
+    }
+
+    case FAILED -> {
+        // 确认请求尚未发送
+        // 排除故障后，可以考虑重新发起调用
+    }
+
+    case UNKNOWN -> {
+        // 无法确认远端是否已经执行操作
+        // 结合业务幂等性或状态查询机制进一步处理
+    }
+}
+```
+
+可以看到，业务代码只需要关注统一的调用结果，而不需要了解底层 HTTP Client 的具体异常类型。对于 `COMPLETED`，业务层继续根据 HTTP 状态码和响应内容判断业务结果；对于 `FAILED`，可以在排除故障后考虑重新发起调用；对于 `UNKNOWN`，则需要结合业务幂等性或状态查询机制进一步确认远端执行结果。
+
+通过这套设计，我们就把第二章提出的调用结果分类落实到了 Java 代码中：底层 HTTP Client 负责实际通信，统一调用层负责调用结果的识别和转换，业务层负责根据 HTTP 响应判断业务结果。
+
+需要强调的是，这里实现的是一个最小化的统一调用层，并不是一个完整的 HTTP 客户端框架。实际项目中还可以根据需要增加请求日志、调用耗时统计、请求 ID、链路追踪，以及不同 HTTP Client 的适配实现，但这些功能都不应该改变三种调用结果的基本语义。
 
 ## 5. Java HTTP 调用架构设计
 
