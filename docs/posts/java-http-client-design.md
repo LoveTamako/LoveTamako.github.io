@@ -112,11 +112,23 @@ HTTP 协议只规定了请求和响应的交互方式，并没有定义客户端
 
 :::
 
-## 3. 统一 HTTP 调用层设计
+## 3. 统一 HTTP 调用层的设计与实现
 
 前面已经将 HTTP 调用结果划分为 `COMPLETED`、`FAILED` 和 `UNKNOWN` 三种状态。接下来，我们将基于现有 Java HTTP Client，在其之上增加一层轻量级封装，统一处理 HTTP 请求、响应以及调用结果的识别与转换。
 
-本章以 JDK `HttpClient` 为例，介绍这层统一调用逻辑的设计与实现。
+本章以 JDK `HttpClient` 为例，给出这层封装的具体实现。
+
+::: tip 代码所用的 JDK 版本
+
+文中代码基于 JDK 17 编写，涉及的新语法与最低版本要求如下：
+
+- `java.net.http.HttpClient`：Java 11 及以上
+- `CallResult` 使用的 `record`：Java 16 及以上
+- 示例中的箭头式 `switch`：Java 14 及以上
+
+如果项目版本更低，把 `record` 改写为普通类并补齐 `equals`、`hashCode`、`toString`，再把 `switch` 换成传统写法即可。
+
+:::
 
 ### 3.1 整体设计与代码结构
 
@@ -162,12 +174,15 @@ http/
 
 把异常分类抽象成独立接口后，执行器不必关心某一种 HTTP Client 特有的异常规则。后续适配 Apache HttpClient 或 OkHttp 时，只需补充对应的分类实现，即可复用这套结果模型与执行器。
 
-接下来，我们按照代码之间的依赖关系，逐个实现这些类。
-
+接下来，我们按照代码之间的依赖关系，逐个实现这些类，顺序与上图正好相反：先写被依赖的调用结果模型，再写异常分类，最后是请求执行器。
 
 ### 3.2 调用结果模型
 
-首先定义调用结果状态，对应第二章介绍的三种调用结果：
+调用结果模型由两个类组成：`CallStatus` 用于表示一次 HTTP 调用的结果状态，`CallResult` 则将调用状态与对应的响应或异常信息封装在一起。将两者分开，可以让调用状态作为独立的枚举值使用，同时通过 `CallResult` 统一传递一次调用的完整结果。
+
+#### CallStatus
+
+`CallStatus` 对应第二章介绍的三种调用结果，定义如下：
 
 ```java
 public enum CallStatus {
@@ -178,53 +193,99 @@ public enum CallStatus {
     COMPLETED,
 
     /**
-     * 能够确认请求尚未发送
+     * 能够确认请求数据尚未发送到服务端
      */
     FAILED,
 
     /**
-     * 无法确认远端执行结果
+     * 无法确认请求是否已发送，或是否收到完整响应
      */
     UNKNOWN
 }
 ```
 
-接下来定义统一的调用结果对象 `CallResult`，用于封装一次 HTTP 调用的最终结果。
+#### CallResult
 
-不同调用状态需要保留的信息有所不同：`COMPLETED` 表示已经收到完整 HTTP 响应，因此需要保存响应对象；`FAILED` 和 `UNKNOWN` 通常没有完整响应，需要保存异常信息，方便上层分析调用失败的原因。
+`CallResult` 是一次调用结束后的完整快照。三个字段并非总是同时有值：`COMPLETED` 表示已经拿到完整响应，`response` 有值而 `cause` 为 `null`；`FAILED` 和 `UNKNOWN` 表示请求没有完整走完，此时 `response` 为 `null`，原因记录在 `cause` 中。响应与异常因此互斥，上层只需要按状态读取对应的那个字段。
 
-可以使用一个泛型类统一表示：
+用一个泛型 `record` 表示：
 
 ```java
+/**
+ * 一次 HTTP 调用的完整结果。
+ *
+ * @param status   调用结果状态
+ * @param response 完整 HTTP 响应，仅 COMPLETED 时存在
+ * @param cause    调用异常，FAILED 与 UNKNOWN 时存在
+ */
 public record CallResult<T>(
         CallStatus status,
         T response,
         Throwable cause
 ) {
 
+    /**
+     * 已收到完整 HTTP 响应。
+     */
     public static <T> CallResult<T> completed(T response) {
         return new CallResult<>(CallStatus.COMPLETED, response, null);
     }
 
+    /**
+     * 能够确认请求数据尚未发送，远端不会执行任何业务操作。
+     */
     public static <T> CallResult<T> failed(Throwable cause) {
         return new CallResult<>(CallStatus.FAILED, null, cause);
     }
 
+    /**
+     * 无法确认远端是否已经执行，需结合幂等性或状态查询处理。
+     */
     public static <T> CallResult<T> unknown(Throwable cause) {
         return new CallResult<>(CallStatus.UNKNOWN, null, cause);
     }
 }
 ```
 
-这里使用泛型 `T`，是为了避免调用结果模型与某个具体 HTTP 客户端绑定。例如，JDK `HttpClient` 可以使用 `HttpResponse<byte[]>` 作为响应类型，其他客户端也可以使用各自的响应对象。
+::: tip record
 
-这样，`CallResult` 不需要关心底层使用的是哪一种 HTTP Client，只需要统一保存调用状态、响应对象和异常信息即可。
+`record` 是 Java 16 引入的语法，用于声明不可变的数据载体。编译器会自动生成构造器、`status()`、`response()`、`cause()` 这样的访问器，以及 `equals`、`hashCode`、`toString`。因此上面这段声明等价于一个只有字段和访问器的普通类，区别在于访问器不带 `get` 前缀。
 
-目前这个结果对象只保留三个核心信息：调用状态、HTTP 响应和异常原因。它们分别解决了三个问题：本次调用处于什么状态、是否获得了完整响应，以及如果没有完成调用，发生了什么异常。
+:::
 
-需要注意，`CallResult` 只是调用结果的统一表达，并不负责判断调用状态是否正确。具体的结果分类由后面的异常分类组件和 HTTP 请求执行器完成。
+三种状态分别由对应的工厂方法构造，字段取值也随状态而变：
 
-### 3.3 异常分类与结果转换
+```java
+// COMPLETED：response 有值，cause 为 null
+CallResult<HttpResponse<byte[]>> completed = CallResult.completed(response);
+
+// FAILED：能够确认请求未发出，response 为 null
+CallResult<HttpResponse<byte[]>> failed = CallResult.failed(new IOException("connect failed"));
+
+// UNKNOWN：无法确认远端是否执行，response 为 null
+CallResult<HttpResponse<byte[]>> unknown = CallResult.unknown(new HttpTimeoutException("request timed out"));
+```
+
+无论哪种状态，调用方拿到的都是同一个类型：先看 `status()`，再决定读 `response()` 还是 `cause()`，另一个字段必然为 `null`。
+
+这里用泛型 `T` 而不是 `Object`，是因为不同客户端返回的响应类型各不相同：声明成 `Object` 的话，调用方每次取值都要强制转换，类型一旦写错也只能等到运行时才暴露；而泛型把具体类型保留到调用侧，`result.response()` 拿到的就是创建时的类型。
+
+```java
+// JDK HttpClient
+CallResult<HttpResponse<byte[]>> jdk = CallResult.completed(httpResponse);
+
+// Apache HttpClient
+CallResult<CloseableHttpResponse> apache = CallResult.completed(closeableResponse);
+
+// OkHttp
+CallResult<Response> okhttp = CallResult.completed(okResponse);
+```
+
+这样，`CallResult` 只约束“结论 + 证据”的结构，不约束证据的具体类型，结果模型因此与具体 HTTP 客户端解耦。
+
+需要注意，`CallResult` 只负责表达结果，不负责判定结果：状态该是 `FAILED` 还是 `UNKNOWN`，由后面的异常分类组件和请求执行器决定。
+
+### 3.3 异常分类：FailureClassifier 与 JdkFailureClassifier
 
 定义好调用结果模型之后，还需要解决一个问题：当 HTTP 请求执行过程中发生异常时，应该如何判断属于 `FAILED` 还是 `UNKNOWN`？
 
@@ -271,7 +332,7 @@ JDK `HttpClient` 的常规同步调用接口并没有提供一个通用的请求
 
 通过这种方式，异常分类规则与 HTTP 请求执行逻辑分离，既方便针对不同客户端进行适配，也避免将某一种客户端的异常处理规则写死在统一调用层中。
 
-### 3.4 HTTP 请求执行器
+### 3.4 HTTP 请求执行器：HttpCallExecutor
 
 完成调用结果模型和异常分类之后，就可以实现真正的 HTTP 请求执行器。
 
@@ -412,26 +473,3 @@ switch (result.status()) {
 
 需要强调的是，这里实现的是一个最小化的统一调用层，并不是一个完整的 HTTP 客户端框架。实际项目中还可以根据需要增加请求日志、调用耗时统计、请求 ID、链路追踪，以及不同 HTTP Client 的适配实现，但这些功能都不应该改变三种调用结果的基本语义。
 
-## 5. Java HTTP 调用架构设计
-
-### 5.1 整体架构与职责划分
-
-### 5.2 HTTP Transport
-
-### 5.3 HTTP Client
-
-### 5.4 CallOutcome 与 FailReason
-
-### 5.5 组件之间的调用关系
-
-## 6. Java HTTP 调用代码实现
-
-### 6.1 HTTP Transport 实现
-
-### 6.2 HTTP Client 实现
-
-### 6.3 调用结果分类
-
-### 6.4 超时与重试处理
-
-### 6.5 业务层调用与异常恢复
