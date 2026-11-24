@@ -122,48 +122,48 @@ HTTP 协议只规定了请求和响应的交互方式，并没有定义客户端
 
 在正式编写代码之前，先通过下面的目录结构了解统一 HTTP 调用层的整体设计。
 
-```
+```text
 http/
-├── CallStatus.java              // 定义 HTTP 调用结果状态
-├── CallResult.java              // 封装调用状态、HTTP 响应和异常信息
-├── FailureClassifier.java       // 定义异常分类接口
-├── JdkFailureClassifier.java    // 实现 JDK HttpClient 异常分类策略
-└── HttpCallExecutor.java        // 执行 HTTP 请求并转换调用结果
+├── CallStatus.java              // 状态枚举
+├── CallResult.java              // 结果对象
+├── FailureClassifier.java       // 分类接口
+├── JdkFailureClassifier.java    // JDK 实现
+└── HttpCallExecutor.java        // 执行器
 ```
 
-从职责上来看，统一 HTTP 调用层主要包含三个部分：
-
-1. 调用结果模型：由 CallStatus 和 CallResult 实现。CallStatus 定义 HTTP 调用结果状态，CallResult 负责封装调用状态、HTTP 响应和异常信息。
-2. 异常分类：由 FailureClassifier 和 JdkFailureClassifier 实现。FailureClassifier 定义异常分类接口，JdkFailureClassifier 提供基于 JDK HttpClient 的异常分类实现。
-3. HTTP 请求执行：由 HttpCallExecutor 实现，负责调用底层 HTTP Client，并根据请求执行结果或发生的异常，生成统一的调用结果。
-
-这些类之间的关系可以概括为：
+从整体结构上看，各类之间的协作关系如下：
 
 ```text
-                 HttpCallExecutor
-                        |
-             +----------+----------+
-             |                     |
-             v                     v
-         HttpClient         FailureClassifier
-             |                     |
-             v                     v
-         HTTP 响应               异常分类
-             |                     |
-             +----------+----------+
-                        |
-                        v
-                    CallResult
-                        |
-                        v
-                    CallStatus
+                    HttpCallExecutor
+                           |
+            +--------------+--------------+
+            |                             |
+            v                             v
+       HttpClient                  FailureClassifier
+            |                             ^
+            v                             | 实现
+       HTTP 响应                 JdkFailureClassifier
+            |                             |
+            +--------------+--------------+
+                           |
+                           v
+                       CallStatus
+                           |
+                           v
+                       CallResult
+                  { status, response, cause }
 ```
 
-其中，HttpCallExecutor 是整个调用层的核心入口，负责协调 HTTP 请求执行、异常分类和结果转换。当 HTTP 请求正常完成并收到完整响应时，执行器将响应封装为 COMPLETED 结果；当请求执行过程中发生异常时，则通过 FailureClassifier 判断调用结果属于 FAILED 还是 UNKNOWN，再统一封装为 CallResult。
+按图中自上而下的顺序，这层封装的职责可以划分为三个部分：
 
-通过引入 FailureClassifier，执行器不需要直接处理某一种 HTTP Client 特有的异常分类规则，从而将请求执行与异常分类解耦。后续如果需要适配 Apache HttpClient 或 OkHttp，只需要根据对应客户端的异常特点提供相应的分类实现，就可以复用统一的调用结果模型和执行器设计。
+1. **请求执行**：`HttpCallExecutor` 是整个调用层的核心入口，负责调用底层 `HttpClient` 发起请求。请求正常完成并收到完整响应时，将结果封装为 `COMPLETED`；发生异常时，则交由异常分类器进一步判断。
+2. **异常分类**：`FailureClassifier` 定义分类接口，`JdkFailureClassifier` 提供基于 JDK `HttpClient` 的具体分类实现，用于将调用异常归为 `FAILED` 还是 `UNKNOWN`。
+3. **调用结果模型**：`CallStatus` 定义三种调用结果状态，`CallResult` 将调用状态、HTTP 响应和异常信息统一封装为一个对象。
+
+把异常分类抽象成独立接口后，执行器不必关心某一种 HTTP Client 特有的异常规则。后续适配 Apache HttpClient 或 OkHttp 时，只需补充对应的分类实现，即可复用这套结果模型与执行器。
 
 接下来，我们按照代码之间的依赖关系，逐个实现这些类。
+
 
 ### 3.2 调用结果模型
 
