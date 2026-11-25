@@ -223,129 +223,87 @@ public record CallResult<T>(
 
 需要注意，当前实现通过静态工厂方法约定了不同状态对应的字段组合，但没有强制校验。例如，调用方仍然可以直接通过构造器创建一个状态为 `COMPLETED`、但 `response` 为 `null` 的对象。现阶段先保持实现简单，后续如果需要严格保证结果对象的合法性，再考虑增加构造器校验。
 
-### 3.3 请求执行阶段与异常处理
+### 3.3 HTTP 请求执行器（HttpCallExecutor）
 
-有了调用结果模型之后，还需要解决一个关键问题：请求执行过程中发生异常时，应该返回 `FAILED` 还是 `UNKNOWN`？
+有了调用结果模型之后，还需要一个组件负责执行 HTTP 请求，并将底层 HTTP Client 返回的响应或抛出的异常转换为统一的调用结果。这个组件就是位于统一调用层与底层 HTTP Client 之间的 `HttpCallExecutor`，主要承担以下职责：
 
-最初可以考虑通过异常类型进行分类，例如遇到连接异常返回 `FAILED`，遇到读取超时返回 `UNKNOWN`。但这种方式存在一个问题：Java HTTP 调用涉及不同的 HTTP Client、底层网络实现以及各种请求处理逻辑，异常类型不仅难以穷举，也不一定能够准确反映请求执行到了哪个阶段。同一种异常可能发生在不同的执行阶段，而不同的异常也可能代表相似的执行结果。
+- **请求执行**：准备 HTTP 请求，组装请求头和请求体，并调用底层 HTTP Client 发送请求、接收响应。
+- **结果转换**：根据请求执行情况及其产生的响应或异常，判断调用状态，并封装为 `CallResult`。
 
-更重要的是，调用层真正关心的并不是发生了哪一种异常，而是**能否确认请求数据尚未发送到服务端**。因此，与其建立一套不断扩充的异常类型映射规则，不如让 `HttpCallExecutor` 结合请求执行过程和当前能够获得的信息来判断调用结果。
+通过这层封装，调用方只需要提供请求构建逻辑和执行参数，就可以获得统一的 `CallResult`，而不需要直接处理底层 HTTP Client 的响应和异常。
 
-#### 请求执行阶段
+接下来，我们先分析 HTTP 请求的执行过程，了解不同阶段可能出现的异常及其判断依据，再据此设计 `HttpCallExecutor` 的结果处理逻辑。
 
-一次 HTTP 调用可以按照执行过程划分为以下几个阶段：
+#### 执行过程与结果判定
+
+为了让 `HttpCallExecutor` 能够正确判断调用结果，需要先了解底层 HTTP Client 的执行过程，以及不同阶段发生异常时能够获得哪些判断依据。
+
+以 JDK `HttpClient` 为例，一次同步调用大致经历以下过程：
 
 ```text
-创建请求 → 组装 Header、Body → 调用 HttpClient.send()
-                                      ↓
-                              接收 HTTP 响应
-                                      ↓
-                                读取完整响应体
+请求准备 → 调用 HttpClient.send() → 建立连接、发送请求 → 接收响应 → 读取完整响应体
 ```
 
-在调用底层 HTTP Client 之前，执行器通常需要完成请求对象的创建、请求头组装以及请求体准备等工作。这些操作属于本地请求准备阶段。如果此时发生参数错误、请求构建失败或 Body 序列化异常，并且能够确认没有其他操作提前发送请求，就可以将调用结果归为 `FAILED`。
+根据请求执行过程和能够获得的判断依据，可以将调用结果分为以下三种情况：
+* **COMPLETED**：已经完整接收 HTTP 响应。如果底层 HTTP Client 正常返回，并且已经完整读取响应体，则归为 `COMPLETED`。例如，使用 `BodyHandlers.ofByteArray()` 时，`send()` 正常返回意味着响应体已经完整读取。
 
-当执行器调用 `HttpClient.send()` 后，请求就进入底层客户端的执行过程。此时，客户端可能正在解析 DNS、建立连接、发送请求数据或接收响应。以 JDK `HttpClient` 为例，这些内部执行阶段并没有完整地暴露给调用方，因此当执行过程中发生普通 I/O 异常或超时时，调用方通常无法准确判断请求是否已经发送，更无法确认服务端是否已经执行了对应的业务操作。此时应当采用保守策略，将调用结果归为 `UNKNOWN`。
+* **FAILED**：能够确认请求数据尚未发送。如果请求准备阶段发生异常，或者在底层客户端执行过程中能够确认请求数据尚未发送，则归为 `FAILED`。例如，DNS 解析失败、连接建立失败或 TLS 握手失败。
 
-如果客户端正常返回，并且已经完整读取 HTTP 响应体，则归为 `COMPLETED`。这里需要注意，收到响应头并不代表已经取得完整响应，响应体读取失败仍然不能算作 `COMPLETED`。
+* **UNKNOWN**：无法确认请求是否已经发送。如果请求执行过程中发生连接中断、I/O 异常或超时，且无法确认请求是否已经发送，则归为 `UNKNOWN`。以 JDK `HttpClient` 为例，其内部执行阶段并未完整暴露，因此无法仅凭异常类型准确判断请求发送状态。
 
-#### 异常处理策略
+在实际实现中，不能简单地根据异常类型判断调用结果，而需要结合请求执行过程及能够获得的判断依据。例如，JDK `HttpClient` 提供的 `HttpConnectTimeoutException` 表示连接建立超时，但执行器仍需要判断是否有足够证据证明请求数据尚未发送。对于无法获得明确证据的情况，应采用保守策略，将调用结果归为 `UNKNOWN`。
 
-结合上述执行过程，可以得到以下判断原则：
+因此，异常类型可以作为判断依据的一部分，但不能替代对请求执行过程的判断。这也是封装 `HttpCallExecutor` 时需要重点考虑的问题。
 
-| 执行情况               | 调用结果        | 判断依据         |
-| ------------------ | ----------- | ------------ |
-| 本地请求准备阶段发生异常       | `FAILED`    | 能够确认请求尚未发送   |
-| 明确的连接建立失败          | `FAILED`    | 能够确认请求数据尚未发送 |
-| 请求执行过程中发生普通 I/O 异常 | `UNKNOWN`   | 无法确认请求是否已经发送 |
-| 请求执行过程中发生超时        | `UNKNOWN`   | 无法确认远端是否已经处理 |
-| 请求执行过程中线程被中断       | `UNKNOWN`   | 请求可能已经发送     |
-| 收到完整 HTTP 响应       | `COMPLETED` | 已经取得完整响应     |
+#### HttpCallExecutor 实现
 
-这里的核心原则是：只有存在明确证据证明请求数据尚未发送，才返回 `FAILED`；如果无法确认，就返回 `UNKNOWN`。例如，JDK `HttpClient` 提供的 `HttpConnectTimeoutException` 表示连接建立超时，可以作为连接阶段失败的明确依据；但普通的 `HttpTimeoutException`、`IOException` 等异常，不能仅凭类型就认定请求尚未发送。对于其他连接异常，也需要结合客户端能够提供的执行信息进行判断，而不能简单地根据异常名称推断结果。
+基于上述思路，可以将请求准备、底层客户端调用和结果转换统一放在 `HttpCallExecutor` 中。执行器负责协调整个请求执行过程，并根据执行结果和异常信息创建对应的 `CallResult`，不需要额外引入独立的异常分类接口。
 
-#### 实现方式
+在请求准备阶段，执行器需要获取已经组装好的 HTTP 请求。由于不同接口的请求地址、请求头和请求体各不相同，这些具体内容交由调用方构建即可。为了让执行器能够管理请求准备过程，可以使用 `Supplier<HttpRequest>` 将请求构建逻辑传递进来。
 
-基于上述思路，异常处理逻辑可以直接放在 `HttpCallExecutor` 中。执行器负责准备请求、调用底层客户端，并根据执行过程和异常信息创建对应的 `CallResult`，不需要额外引入独立的异常分类接口。
+`Supplier` 是 Java 提供的函数式接口，通过 `get()` 方法获取一个对象。在这里，它负责执行请求构建逻辑并返回 `HttpRequest`。这样，执行器就可以在同一个调用过程中区分请求准备阶段和底层 HTTP 执行阶段。
 
-以 JDK `HttpClient` 为例，请求已经构建完成之后，核心执行逻辑可以简化为：
+首先，定义执行器：
 
 ```java
-public CallResult<HttpResponse<byte[]>> execute(
-        HttpRequest request) {
+import java.io.IOException;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.Objects;
+import java.util.function.Supplier;
 
-    try {
-        // 发起请求，并完整读取响应体
-        HttpResponse<byte[]> response = httpClient.send(
-                request,
-                HttpResponse.BodyHandlers.ofByteArray()
-        );
-
-        return CallResult.completed(response);
-
-    } catch (HttpConnectTimeoutException e) {
-
-        // 连接建立超时，可以确认请求数据尚未发送
-        return CallResult.failed(e);
-
-    } catch (InterruptedException e) {
-
-        // 恢复线程中断状态
-        Thread.currentThread().interrupt();
-
-        // 无法确认请求是否已经发送
-        return CallResult.unknown(e);
-
-    } catch (IOException e) {
-
-        // 无法确认请求是否已经发送
-        return CallResult.unknown(e);
-    }
-}
-```
-
-这里使用 `BodyHandlers.ofByteArray()`，是为了在 `send()` 正常返回时确保响应体已经完整读取。如果响应体读取过程中发生 I/O 异常，`send()` 会抛出异常，执行器也就无法返回一个完整的响应对象，因此不能将其判定为 `COMPLETED`。
-
-需要注意，`HttpConnectTimeoutException` 是 `HttpTimeoutException` 的子类，因此如果同时处理这两种异常，应当优先捕获前者。另外，`InterruptedException` 并不意味着请求尚未发送，所以不能直接归为 `FAILED`。恢复线程中断标记后，将结果归为 `UNKNOWN`，可以避免丢失调用线程原本的中断状态。
-
-这段代码展示的是请求已经构建完成之后的执行与异常处理过程。实际实现中，请求构建、Header 组装和 Body 准备等操作也可以由执行器负责，但应当与调用 `send()` 的部分明确区分。准备阶段能够确认请求尚未发送的异常可以归为 `FAILED`；进入底层客户端执行过程后，则需要根据客户端能够提供的证据判断，不能简单地将所有异常都归为 `FAILED`。
-
-**实现要点**
-
-- **以执行过程为依据**：结合请求执行阶段和可获得的证据判断调用结果，而不是仅根据异常类型进行分类。
-- **保守处理不确定性**：能够确认请求尚未发送时返回 `FAILED`；无法确认时返回 `UNKNOWN`；收到完整响应时返回 `COMPLETED`。
-- **保持职责简单**：由 `HttpCallExecutor` 负责执行请求、处理异常和创建 `CallResult`，不额外引入独立的异常分类组件。
-
-通过这种方式，调用结果的判断逻辑与请求执行过程保持在同一个组件中，既避免了维护一套难以穷举的异常分类规则，也减少了不必要的抽象。后续如果需要适配 Apache HttpClient、OkHttp 等其他客户端，再根据各自能够提供的执行阶段信息调整具体实现即可。
-
-### 3.4 HTTP 请求执行器：HttpCallExecutor
-
-完成调用结果模型和异常分类之后，就可以实现真正的 HTTP 请求执行器。
-
-这里使用 JDK 提供的 `java.net.http.HttpClient` 发送请求，并通过前面定义的 `FailureClassifier` 处理执行过程中发生的异常。
-
-首先定义 `HttpCallExecutor`：
-
-```java
 public class HttpCallExecutor {
 
-    private final HttpClient client;
+    private final HttpClient httpClient;
 
-    private final FailureClassifier failureClassifier;
-
-    public HttpCallExecutor(
-            HttpClient client,
-            FailureClassifier failureClassifier) {
-
-        this.client = client;
-        this.failureClassifier = failureClassifier;
+    public HttpCallExecutor(HttpClient httpClient) {
+        this.httpClient = Objects.requireNonNull(httpClient);
     }
 
+    /**
+     * 准备并执行 HTTP 请求，返回统一的调用结果。
+     */
     public CallResult<HttpResponse<byte[]>> execute(
-            HttpRequest request) {
+            Supplier<HttpRequest> requestSupplier) {
+
+        Objects.requireNonNull(requestSupplier);
+
+        HttpRequest request;
 
         try {
-            HttpResponse<byte[]> response = client.send(
+            // 准备 HTTP 请求
+            request = Objects.requireNonNull(requestSupplier.get());
+
+        } catch (RuntimeException e) {
+
+            // 请求尚未交给底层客户端执行
+            return CallResult.failed(e);
+        }
+
+        try {
+            // 发起请求，并完整读取响应体
+            HttpResponse<byte[]> response = httpClient.send(
                     request,
                     HttpResponse.BodyHandlers.ofByteArray()
             );
@@ -354,18 +312,12 @@ public class HttpCallExecutor {
 
         } catch (InterruptedException e) {
 
-            // 恢复线程中断标记
+            // 恢复线程中断状态
             Thread.currentThread().interrupt();
 
             return CallResult.unknown(e);
 
         } catch (IOException e) {
-
-            CallStatus status = failureClassifier.classify(e);
-
-            if (status == CallStatus.FAILED) {
-                return CallResult.failed(e);
-            }
 
             return CallResult.unknown(e);
         }
@@ -373,89 +325,26 @@ public class HttpCallExecutor {
 }
 ```
 
-这个类是整个统一调用层的核心。它持有底层 `HttpClient` 和异常分类器，对外提供统一的 `execute()` 方法。业务代码只需要提交一个 `HttpRequest`，就可以获得统一的 `CallResult`，不需要直接处理底层客户端的异常分类逻辑。
+下面结合执行过程分析这段代码。
 
-下面按照实际执行顺序分析这段代码。
+首先，构造方法接收一个 `HttpClient` 实例，并将其保存为成员变量。这里没有在执行器内部创建 `HttpClient`，而是通过构造方法注入，将 HTTP Client 的创建与请求执行职责分离。调用方可以根据实际需求配置连接超时、代理、重定向策略等参数，也可以在多个请求之间复用同一个 `HttpClient` 实例。
 
-首先，执行器调用 `client.send()` 发送 HTTP 请求，并使用 `BodyHandlers.ofByteArray()` 接收响应体。该处理方式会在响应体读取完成后返回，因此当 `send()` 正常返回时，可以将本次调用判定为 `COMPLETED`。
+接下来，`execute()` 接收一个 `Supplier<HttpRequest>`。调用方通过这个函数式接口传入请求构建逻辑，执行器调用 `requestSupplier.get()` 获取最终的 `HttpRequest`。在请求构建过程中，调用方可以设置请求地址、请求头和请求体，例如使用 `HttpRequest.newBuilder()` 创建请求对象，并通过 `header()`、`POST()` 等方法完成配置。
 
-这里需要特别注意，不能仅仅因为收到了响应状态码和响应头，就认为调用已经完成。如果响应体还没有读取完成，后续仍然可能发生读取超时或连接中断。因此，当前实现选择将响应体完整读取作为调用完成的判断条件。
+如果请求准备过程中发生运行时异常，或者没有成功生成请求对象，执行器就可以确认请求尚未交给底层 HTTP Client 执行，因此返回 `FAILED`。这里需要注意，传入的 `Supplier` 应当只负责本地请求准备，不能在其中提前发送 HTTP 请求或执行其他外部操作。另外，`Supplier` 不支持直接抛出受检异常，如果请求准备过程涉及受检异常，需要在调用方进行适当转换，或者定义支持受检异常的函数式接口。
 
-如果执行过程中抛出 `IOException`，执行器不会直接将其判定为 `FAILED`，而是交给 `FailureClassifier` 进行分类。只有分类器能够确认请求尚未发送时，才返回 `FAILED`；否则返回 `UNKNOWN`。
+请求准备完成后，执行器调用 `httpClient.send()` 发起同步请求。这里使用 `HttpResponse.BodyHandlers.ofByteArray()` 作为响应体处理器，表示将响应体完整读取为字节数组。当 `send()` 正常返回时，说明完整响应已经接收，可以将其封装为 `COMPLETED`。
 
-对于 `InterruptedException`，则采用保守处理。因为线程中断可能发生在请求执行过程中的不同阶段，仅凭中断异常无法确认请求是否已经发送，所以返回 `UNKNOWN`，同时恢复线程的中断标记，避免中断状态丢失。
+需要注意，`COMPLETED` 只表示 HTTP 调用已经完整获得响应，并不代表业务处理成功。例如，服务端返回 HTTP 400、404 或 500，只要客户端完整接收到了响应，调用结果仍然是 `COMPLETED`。至于响应代表业务成功还是失败，应由上层业务代码根据 HTTP 状态码、响应体以及接口约定进一步判断。
 
-另外，这里没有捕获所有 `RuntimeException`。例如，空指针、错误的参数使用等编程问题，不应该被当成普通的 HTTP 通信异常吞掉，而应该继续向外抛出，交由上层发现和处理。
+如果 `send()` 执行过程中发生 `IOException`，执行器将返回 `UNKNOWN`。这是因为该异常可能发生在不同阶段：请求可能尚未发送，也可能已经发送到服务端，只是在等待响应或读取响应体时发生了异常。由于当前 JDK `HttpClient` 没有向执行器提供足够的信息来可靠判断请求是否已经发送，因此这里采用保守策略。
 
-至此，统一调用层已经具备最基本的执行能力：正常收到完整响应时返回 `COMPLETED`，发生通信异常时通过分类器判断，无法确认请求是否发送时返回 `UNKNOWN`。
+对于 `InterruptedException`，处理方式也类似。线程中断并不能证明 HTTP 请求尚未发送。此时，执行器通过 `Thread.currentThread().interrupt()` 恢复线程的中断标记，再返回 `UNKNOWN`，避免丢失中断信号，同时保留调用结果的不确定性。
 
-需要说明的是，当前 `JdkFailureClassifier` 采用保守策略，因此这个最小实现尚不能主动识别所有 `FAILED` 场景。它优先保证结果分类不会因为错误判断而将可能已经发送的请求误认为未发送。这也是在实际项目中设计调用结果分类时需要遵循的原则。
+**实现要点**
 
-### 3.5 完整调用示例
+- **请求准备与执行分离**：调用方负责构建请求地址、请求头和请求体，执行器通过 `Supplier<HttpRequest>` 管理请求准备过程，并调用底层客户端执行请求。
+- **根据执行过程判断结果**：请求准备阶段发生异常时返回 `FAILED`；底层执行期间无法确认请求发送状态时返回 `UNKNOWN`；完整接收响应后返回 `COMPLETED`。
+- **统一结果处理**：由 `HttpCallExecutor` 负责协调请求准备、执行请求、处理异常和创建 `CallResult`，不额外引入独立的异常分类组件。
 
-完成上述类的定义之后，就可以将它们组合起来，形成一次完整的 HTTP 调用。
-
-首先，创建 JDK `HttpClient`，并初始化统一调用执行器：
-
-```java
-HttpClient client = HttpClient.newBuilder()
-        .connectTimeout(Duration.ofSeconds(3))
-        .build();
-
-HttpCallExecutor executor = new HttpCallExecutor(
-        client,
-        new JdkFailureClassifier()
-);
-```
-
-接下来，构造一个 HTTP 请求：
-
-```java
-HttpRequest request = HttpRequest.newBuilder()
-        .uri(URI.create("https://example.com/api/orders"))
-        .header("Content-Type", "application/json")
-        .POST(HttpRequest.BodyPublishers.ofString(
-                "{\"productId\": 1001}"
-        ))
-        .build();
-```
-
-然后通过统一调用执行器发送请求：
-
-```java
-CallResult<HttpResponse<byte[]>> result =
-        executor.execute(request);
-```
-
-业务代码不再需要直接处理 JDK `HttpClient` 的各种异常，而是根据统一的 `CallStatus` 处理调用结果：
-
-```java
-switch (result.status()) {
-
-    case COMPLETED -> {
-        HttpResponse<byte[]> response = result.response();
-
-        int statusCode = response.statusCode();
-        byte[] body = response.body();
-
-        // 根据 HTTP 状态码和响应内容判断业务结果
-    }
-
-    case FAILED -> {
-        // 确认请求尚未发送
-        // 排除故障后，可以考虑重新发起调用
-    }
-
-    case UNKNOWN -> {
-        // 无法确认远端是否已经执行操作
-        // 结合业务幂等性或状态查询机制进一步处理
-    }
-}
-```
-
-可以看到，业务代码只需要关注统一的调用结果，而不需要了解底层 HTTP Client 的具体异常类型。对于 `COMPLETED`，业务层继续根据 HTTP 状态码和响应内容判断业务结果；对于 `FAILED`，可以在排除故障后考虑重新发起调用；对于 `UNKNOWN`，则需要结合业务幂等性或状态查询机制进一步确认远端执行结果。
-
-通过这套设计，我们就把第二章提出的调用结果分类落实到了 Java 代码中：底层 HTTP Client 负责实际通信，统一调用层负责调用结果的识别和转换，业务层负责根据 HTTP 响应判断业务结果。
-
-需要强调的是，这里实现的是一个最小化的统一调用层，并不是一个完整的 HTTP 客户端框架。实际项目中还可以根据需要增加请求日志、调用耗时统计、请求 ID、链路追踪，以及不同 HTTP Client 的适配实现，但这些功能都不应该改变三种调用结果的基本语义。
-
+通过这种方式，请求准备、底层 HTTP 调用和结果转换被统一组织在一个组件中，调用方不需要重复处理底层客户端的响应和异常。后续如果需要适配 Apache HttpClient、OkHttp 等其他客户端，可以根据各自能够提供的执行阶段信息调整具体实现。
