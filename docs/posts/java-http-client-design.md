@@ -178,11 +178,9 @@ http/
 
 ### 3.2 调用结果模型
 
-调用结果模型由两个类组成：`CallStatus` 用于表示一次 HTTP 调用的结果状态，`CallResult` 则将调用状态与对应的响应或异常信息封装在一起。将两者分开，可以让调用状态作为独立的枚举值使用，同时通过 `CallResult` 统一传递一次调用的完整结果。
-
 #### CallStatus
 
-`CallStatus` 对应第二章介绍的三种调用结果，定义如下：
+`CallStatus` 是一个枚举，对应第二章介绍的三种调用结果：
 
 ```java
 public enum CallStatus {
@@ -198,7 +196,7 @@ public enum CallStatus {
     FAILED,
 
     /**
-     * 无法确认请求是否已发送，或是否收到完整响应
+     * 无法确认请求是否已发送，或响应是否完整
      */
     UNKNOWN
 }
@@ -206,9 +204,7 @@ public enum CallStatus {
 
 #### CallResult
 
-`CallResult` 是一次调用结束后的完整快照。三个字段并非总是同时有值：`COMPLETED` 表示已经拿到完整响应，`response` 有值而 `cause` 为 `null`；`FAILED` 和 `UNKNOWN` 表示请求没有完整走完，此时 `response` 为 `null`，原因记录在 `cause` 中。响应与异常因此互斥，上层只需要按状态读取对应的那个字段。
-
-用一个泛型 `record` 表示：
+`CallResult` 用于保存一次 HTTP 调用结束后的完整结果，包括调用状态、HTTP 响应和异常信息：
 
 ```java
 /**
@@ -247,43 +243,15 @@ public record CallResult<T>(
 }
 ```
 
-::: tip record
+**实现要点**
 
-`record` 是 Java 16 引入的语法，用于声明不可变的数据载体。编译器会自动生成构造器、`status()`、`response()`、`cause()` 这样的访问器，以及 `equals`、`hashCode`、`toString`。因此上面这段声明等价于一个只有字段和访问器的普通类，区别在于访问器不带 `get` 前缀。
+- **`record`**：`CallResult` 是典型的数据载体，使用 `record` 可以自动生成构造器、访问器以及 `equals()`、`hashCode()`、`toString()`，减少样板代码。
+- **字段约定**：`COMPLETED` 时保存完整响应，`cause` 为 `null`；`FAILED` 和 `UNKNOWN` 时 `response` 为 `null`，通过 `cause` 保存异常信息。
+- **静态工厂**：通过 `completed()`、`failed()`、`unknown()` 分别创建三种状态的结果对象，避免调用方手动填写三个字段，代码更直观。
+- **泛型**：适配不同 HTTP 客户端的响应类型。例如 JDK `HttpClient` 使用 `HttpResponse<byte[]>`，Apache HttpClient 和 OkHttp 也可以使用各自的响应类型，无需修改 `CallResult`。
+- **职责边界**：`CallResult` 只负责承载调用结果，不负责判定结果。异常属于 `FAILED` 还是 `UNKNOWN` 由异常分类组件判断；执行器根据响应接收情况或异常分类结果，创建对应的 `CallResult`。
 
-:::
-
-三种状态分别由对应的工厂方法构造，字段取值也随状态而变：
-
-```java
-// COMPLETED：response 有值，cause 为 null
-CallResult<HttpResponse<byte[]>> completed = CallResult.completed(response);
-
-// FAILED：能够确认请求未发出，response 为 null
-CallResult<HttpResponse<byte[]>> failed = CallResult.failed(new IOException("connect failed"));
-
-// UNKNOWN：无法确认远端是否执行，response 为 null
-CallResult<HttpResponse<byte[]>> unknown = CallResult.unknown(new HttpTimeoutException("request timed out"));
-```
-
-无论哪种状态，调用方拿到的都是同一个类型：先看 `status()`，再决定读 `response()` 还是 `cause()`，另一个字段必然为 `null`。
-
-这里用泛型 `T` 而不是 `Object`，是因为不同客户端返回的响应类型各不相同：声明成 `Object` 的话，调用方每次取值都要强制转换，类型一旦写错也只能等到运行时才暴露；而泛型把具体类型保留到调用侧，`result.response()` 拿到的就是创建时的类型。
-
-```java
-// JDK HttpClient
-CallResult<HttpResponse<byte[]>> jdk = CallResult.completed(httpResponse);
-
-// Apache HttpClient
-CallResult<CloseableHttpResponse> apache = CallResult.completed(closeableResponse);
-
-// OkHttp
-CallResult<Response> okhttp = CallResult.completed(okResponse);
-```
-
-这样，`CallResult` 只约束“结论 + 证据”的结构，不约束证据的具体类型，结果模型因此与具体 HTTP 客户端解耦。
-
-需要注意，`CallResult` 只负责表达结果，不负责判定结果：状态该是 `FAILED` 还是 `UNKNOWN`，由后面的异常分类组件和请求执行器决定。
+需要注意，当前实现通过静态工厂方法约定了不同状态对应的字段组合，但没有强制校验。例如，调用方仍然可以直接通过构造器创建一个状态为 `COMPLETED`、但 `response` 为 `null` 的对象。现阶段先保持实现简单，后续如果需要严格保证结果对象的合法性，再考虑增加构造器校验。
 
 ### 3.3 异常分类：FailureClassifier 与 JdkFailureClassifier
 
